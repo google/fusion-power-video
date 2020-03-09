@@ -5,6 +5,8 @@ successive photographic 12-bit or 16-bit grayscale frames of the plasma inside a
 fusion reactor in real-time, with simple predictors designed to work well on
 different models of cameras with different noise and inter-frame behavior.
 
+This is not an official Google product.
+
 ## Build Instructions
 
 If needed, install libbrotli-dev and CMake:
