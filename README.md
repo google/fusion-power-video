@@ -7,15 +7,13 @@ different models of cameras with different noise and inter-frame behavior.
 
 ## Build Instructions
 
-If needed, install libbrotli-dev:
+If needed, install libbrotli-dev and CMake:
 
-`sudo apt-get install libbrotli-dev`
+`sudo apt-get install libbrotli-dev cmake`
 
-Compile with:
+Compile by creating a build directory and, from it, running:
 
-`clang++ -O3 -std=c++11 benchmark.cc fusion_power_video.cc -lbrotlidec -lbrotlienc -o benchmark`
-
-`clang++ -O3 -std=c++11 encode.cc fusion_power_video.cc -lbrotlidec -lbrotlienc -o encode`
-
-`clang++ -O3 -std=c++11 decode.cc fusion_power_video.cc -lbrotlidec -lbrotlienc -o decode`
-
+```bash
+cmake -DCMAKE_BUILD_TYPE=Release $source_directory
+make
+```
