@@ -22,6 +22,7 @@
 #include <iostream>
 #include <thread>
 
+namespace fpvc {
 namespace {
 
 bool BrotliCompress(const uint8_t* in, size_t size, std::vector<uint8_t>* out,
@@ -117,7 +118,7 @@ float EstimateEntropy(const std::vector<size_t>& v) {
   for (size_t i = 0; i < v.size(); i++) {
     if (!v[i]) continue;
     float p = v[i] * s;
-    // TODO(lode): use a fast log2 approximation
+    // TODO: use a fast log2 approximation
     result -= log2(p) * p;
   }
   return result;
@@ -218,7 +219,7 @@ std::vector<uint8_t> CompressFrame(std::vector<uint16_t> img,
     }
   }
 
-  // TODO(lode): try a simple context model
+  // TODO: try a simple context model
 
 #if USE_CLAMPED_GRADIENT
   {
@@ -256,7 +257,7 @@ std::vector<uint8_t> CompressFrame(std::vector<uint16_t> img,
       temp.swap(img);
     }
   }
-#else   // USE_CLAMPED_GRADIENT
+#else  // USE_CLAMPED_GRADIENT
   {
     std::vector<size_t> counta0(256);
     std::vector<size_t> counth0(256);
@@ -322,6 +323,9 @@ std::vector<uint8_t> CompressFrame(std::vector<uint16_t> img,
     high[i] = (img[i] >> 8u) & 255;
   }
 
+  // NOTE: for this use case, brotli quality 1 gives smaller result than
+  // brotli quality 2, yet is faster. Only the entropy coding matters, not the
+  // LZ77.
   int quality = 1;
   BrotliCompress(low.data(), low.size(), &lowc, quality);
   BrotliCompress(high.data(), high.size(), &highc, quality);
@@ -343,6 +347,11 @@ std::vector<uint8_t> CompressFrame(std::vector<uint16_t> img,
 std::vector<uint16_t> DecompressFrame(const std::vector<uint16_t>& prev,
                                       const uint8_t* in, size_t size,
                                       size_t* pos) {
+  if (*pos >= size) return {};
+
+  size_t expected_size = ReadVarint(in, size, pos);
+  if (*pos + expected_size > size) return {};
+
   if (*pos >= size) return {};
   bool use_delta = in[*pos] & 1;
   bool use_vertical = in[*pos] & 2;
@@ -405,3 +414,87 @@ std::vector<uint16_t> DecompressFrame(const std::vector<uint16_t>& prev,
 
   return img;
 }
+
+Encoder::Encoder(size_t xsize, size_t ysize, size_t num_threads) :
+    xsize(xsize), ysize(ysize) {
+  threads.resize(num_threads);
+  for (size_t i = 0; i < threads.size(); i++) {
+    threads[i] = new std::thread(&Encoder::RunThread, this);
+  }
+}
+
+Encoder::~Encoder() {
+  Join();
+}
+
+void Encoder::Join() {
+  {
+    std::unique_lock<std::mutex> l(m);
+    if (finish) return;  // Already done.
+    cv_main.wait(l, [this]{return q_out.empty();});
+    finish = true;
+  }
+  cv_in.notify_all();
+
+  for (size_t i = 0; i < threads.size(); i++) {
+    threads[i]->join();
+    delete threads[i];
+  }
+}
+
+void Encoder::CompressFrame(const std::vector<uint16_t>* img,
+    const std::vector<uint16_t>* prev,
+    void (*Callback)(const uint8_t* compressed, size_t size, void* payload),
+    void* payload) {
+  Task task;
+  task.frame = img;
+  task.prev = prev;
+  task.id = id++;
+  task.Callback = Callback;
+  task.payload = payload;
+
+  {
+    std::unique_lock<std::mutex> l(m);
+    q_in.push(task);
+    q_out.push(task);
+  }
+  cv_in.notify_one();
+
+  {
+    std::unique_lock<std::mutex> l(m);
+    // Wait if the queue gets too full to prevent out of memory.
+    cv_main.wait(l, [this]{return q_out.size() < threads.size() * 4;});
+  }
+}
+
+void Encoder::RunThread() {
+  for (;;) {
+    Task task;
+
+    // Wait for starting a new compression
+    {
+      std::unique_lock<std::mutex> l(m);
+      cv_in.wait(l, [this]{return !q_in.empty() || finish;});
+      if (finish) return;
+      task = q_in.front();
+      q_in.pop();
+    }
+
+    auto compressed =
+        fpvc::CompressFrame(*task.frame, *task.prev, xsize, ysize);
+    // Wait for outputting in the correct order.
+    {
+      std::unique_lock<std::mutex> l(m);
+      cv_out.wait(l, [&task, this]{return q_out.front().id == task.id;});
+      q_out.pop();
+      task.Callback(compressed.data(), compressed.size(), task.payload);
+    }
+    // Finished outputting
+    cv_out.notify_all();
+    // Changed q_out size
+    cv_main.notify_one();
+  }
+}
+
+}  // namespace fpvc
+

@@ -19,11 +19,12 @@
 #include "fusion_power_video.h"
 
 size_t ParseInt(const std::string& s) {
-  size_t result;
+  size_t result = 0;
   std::istringstream sstream(s);
   sstream >> result;
   return result;
 }
+
 
 int main(int argc, char* argv[]) {
   if (argc != 5) {
@@ -37,7 +38,6 @@ int main(int argc, char* argv[]) {
               << std::endl;
     return 1;
   }
-
   size_t xsize = ParseInt(argv[1]);
   size_t ysize = ParseInt(argv[2]);
   size_t big_endian = ParseInt(argv[3]);
@@ -56,18 +56,35 @@ int main(int argc, char* argv[]) {
 
   size_t framesize = xsize * ysize * 2;
 
-  std::vector<uint16_t> prev;
-  std::vector<uint16_t> img;
-  std::vector<uint8_t> compressed;
   std::vector<uint8_t> buffer(framesize);
 
+  size_t num_threads = 4;
+
+  fpvc::Encoder encoder(xsize, ysize, num_threads);
+
+  std::vector<uint16_t>* prev = new std::vector<uint16_t>();
+
   while (std::cin) {
-    if(!std::cin.read((char*)buffer.data(), framesize)) break;
+    if (!std::cin.read((char*)buffer.data(), framesize)) break;
 
-    img = ExtractFrame(buffer.data(), xsize, ysize, shift, big_endian);
-    compressed = CompressFrame(img, prev, xsize, ysize);
-    fwrite(compressed.data(), 1, compressed.size(), stdout);
+    auto img = new std::vector<uint16_t>();
+    *img = fpvc::ExtractFrame(buffer.data(),
+        xsize, ysize, shift, big_endian);
 
-    prev.swap(img);
+    encoder.CompressFrame(img, prev,
+        [](const uint8_t* compressed, size_t size, void* payload) {
+          fwrite(compressed, 1, size, stdout);
+
+          // The previous frame is guaranteed to have been output already, and
+          // the current frame was the last frame that depended on it, so
+          // delete the previous frame at this point.
+          auto* prev = reinterpret_cast<std::vector<uint16_t>*>(payload);
+          delete prev;
+        }, prev);
+
+    prev = img;
   }
+
+  encoder.Join();
+  delete prev;
 }
