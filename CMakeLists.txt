@@ -22,7 +22,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(Brotli REQUIRED IMPORTED_TARGET libbrotlienc libbrotlidec)
 
 add_library(fusion_power_video STATIC fusion_power_video.h fusion_power_video.cc)
-target_link_libraries(fusion_power_video PRIVATE PkgConfig::Brotli)
+target_link_libraries(fusion_power_video PRIVATE pthread PkgConfig::Brotli)
 
 foreach (executable IN ITEMS benchmark encode decode)
   add_executable("${executable}" "${executable}.cc")

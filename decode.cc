@@ -19,7 +19,7 @@
 #include "fusion_power_video.h"
 
 size_t ParseInt(const std::string& s) {
-  size_t result;
+  size_t result = 0;
   std::istringstream sstream(s);
   sstream >> result;
   return result;
@@ -68,29 +68,30 @@ int main(int argc, char* argv[]) {
 
   while (std::cin) {
     size_t pos = 0;
-    if(!std::cin.read((char*)buffer.data(), 9)) break;
-    size_t size = ReadVarint(buffer.data(), 9, &pos);
+    if (!std::cin.read((char*)buffer.data(), 9)) break;
+    size_t size = fpvc::ReadVarint(buffer.data(), 9, &pos);
     size_t buffer_size = size + pos;
     if (size > max_size) {
       std::cerr << "compressed too large frame: " << size << std::endl;
       return 1;
     }
     if (pos + size > 9) {
-      if(!std::cin.read((char*)buffer.data() + 9, pos + size - 9)) {
+      if (!std::cin.read((char*)buffer.data() + 9, pos + size - 9)) {
         std::cerr << "couldn't read frame from input" << std::endl;
         return 1;
       }
     }
 
-
-    std::vector<uint16_t> img = DecompressFrame(prev, buffer.data(), buffer_size, &pos);
+    pos = 0;
+    std::vector<uint16_t> img =
+        fpvc::DecompressFrame(prev, buffer.data(), buffer_size, &pos);
     if (img.empty()) {
       std::cerr << "decompressing frame failed" << std::endl;
       return 1;
     }
 
     std::vector<uint8_t> raw =
-        UnextractFrame(img, xsize, ysize, shift, big_endian);
+        fpvc::UnextractFrame(img, xsize, ysize, shift, big_endian);
 
     fwrite(raw.data(), 1, raw.size(), stdout);
 

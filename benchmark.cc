@@ -28,7 +28,7 @@ std::string ToString(const T& val) {
 }
 
 size_t ParseInt(const std::string& s) {
-  size_t result;
+  size_t result = 0;
   std::istringstream sstream(s);
   sstream >> result;
   return result;
@@ -63,18 +63,24 @@ struct BenchmarkTime {
 };
 
 void PrintBenchmark(const std::string& label, size_t pixels, size_t size,
-                    double time) {
+                    double time = 0, size_t numframes = 0) {
   double speed = pixels / time / 1000000.0;
   double bpp = size / (double)pixels * 8;
-  std::cout << label << ": " << size << " bytes, " << bpp
-            << " bpp, time: " << (time * 1000) << " ms"
-            << ", speed: " << speed << " MP/s" << std::endl;
+  std::cout << label << ": " << size << " bytes, " << bpp << " bpp";
+  if (numframes > 1) {
+    std::cout << ", bytes per frame: " << ((double)size / numframes);
+  }
+  if (time > 0) {
+    std::cout << ", time: " << (time * 1000) << " ms"
+              << ", speed: " << speed << " MP/s";
+    std::cout << ", frames per second: " << ((double)numframes / time);
+  }
+  std::cout <<  std::endl;
 }
 
-void TestSet(const std::string& filename, size_t xsize, size_t ysize, int shift,
-             bool big_endian, size_t maxframes) {
-  BenchmarkTime t;
-
+void RunBenchmark(const std::string& filename,
+                  size_t xsize, size_t ysize, int shift,
+                  bool big_endian, size_t maxframes, size_t num_threads) {
   std::vector<unsigned char> raw = LoadFile(filename);
   if (raw.empty()) {
     std::cout << "couldn't load " << filename << std::endl;
@@ -82,6 +88,7 @@ void TestSet(const std::string& filename, size_t xsize, size_t ysize, int shift,
   }
 
   size_t framesize = xsize * ysize * 2;
+  size_t numpixels = xsize * ysize;
   size_t num = raw.size() / framesize;
 
   if (num * framesize != raw.size()) {
@@ -89,59 +96,113 @@ void TestSet(const std::string& filename, size_t xsize, size_t ysize, int shift,
               << " pixel: " << framesize << std::endl;
   }
 
-  std::vector<uint16_t> prev;
-
   maxframes = (maxframes == 0) ? num : (std::min(num, maxframes));
 
   size_t total_size = 0;
   size_t total_pixels = 0;
-  double total_time = 0;
+  BenchmarkTime total_timer;
 
-  std::vector<uint16_t> img;
-  std::vector<uint8_t> compressed;
+  struct Frame {
+    std::vector<uint8_t> orig;
+    std::vector<uint8_t> compressed;
+    std::vector<uint16_t>* prev;
+    size_t numpixels;
+    size_t index;
+    size_t* total_size;
+  };
+  std::vector<Frame> frames(maxframes);
 
-  for (size_t i = 0; i < maxframes; i++) {
-    t.start();
-    img = ExtractFrame(raw.data() + framesize * i, xsize, ysize, shift,
-                       big_endian);
-    compressed = CompressFrame(img, prev, xsize, ysize);
-    double time = t.stop();
-    PrintBenchmark("frame " + ToString(i), xsize * ysize, compressed.size(),
-                   time);
-
-    total_pixels += xsize * ysize;
-    total_size += compressed.size();
-    total_time += time;
-
-    // verify
-    {
-      std::vector<uint8_t> before = std::vector<uint8_t>(
-          raw.data() + framesize * i, raw.data() + framesize * i + framesize);
-      size_t pos = 0;
-      size_t expected_size =
-          ReadVarint(compressed.data(), compressed.size(), &pos);
-      std::vector<uint16_t> decompressed =
-          DecompressFrame(prev, compressed.data(), compressed.size(), &pos);
-      std::vector<uint8_t> after =
-          UnextractFrame(decompressed, xsize, ysize, shift, big_endian);
-      if (before != after) {
-        std::cout << "Error: roundtrip not equal! " << decompressed.size()
-                  << " " << after.size() << std::endl;
-        std::exit(1);
-      }
-    }
-
-    // comment out to NOT do delta compression between previous frame
-    prev = img;
+  for (size_t i = 0; i < frames.size(); i++) {
+    Frame& frame = frames[i];
+    frame.orig.assign(raw.data() + framesize * i,
+                      raw.data() + framesize * (i + 1));
+    frame.index = i;
+    frame.numpixels = numpixels;
+    frame.total_size = &total_size;
+    total_pixels += frame.numpixels;
   }
 
-  PrintBenchmark("total", total_pixels, total_size, total_time);
+
+
+  total_timer.start();
+
+  if (num_threads <= 1) {
+    // Singlethreaded benchmark
+    std::vector<uint16_t> img;
+    std::vector<uint16_t> prev;
+    std::vector<uint8_t> compressed;
+    for (size_t i = 0; i < frames.size(); i++) {
+      Frame& frame = frames[i];
+      BenchmarkTime t;
+      t.start();
+      img = fpvc::ExtractFrame(frame.orig.data(), xsize, ysize, shift,
+                               big_endian);
+      frame.compressed = fpvc::CompressFrame(img, prev, xsize, ysize);
+      double time = t.stop();
+      PrintBenchmark("frame " + ToString(i), numpixels, compressed.size(),
+                     time);
+      *frame.total_size += compressed.size();
+      prev.swap(img);
+    }
+  } else {
+    // Multithreaded benchmark
+    fpvc::Encoder encoder(xsize, ysize, num_threads);
+    std::vector<uint16_t>* prev = new std::vector<uint16_t>();
+    for (size_t i = 0; i < frames.size(); i++) {
+      Frame& frame = frames[i];
+      auto img = new std::vector<uint16_t>();
+      *img = fpvc::ExtractFrame(
+          raw.data() + framesize * i, xsize, ysize, shift, big_endian);
+      frame.prev = prev;
+      encoder.CompressFrame(img, prev,
+          [](const uint8_t* compressed, size_t size, void* payload){
+            Frame& frame = *reinterpret_cast<Frame*>(payload);
+            frame.compressed.assign(compressed, compressed + size);
+            *frame.total_size += size;
+            PrintBenchmark(
+                "frame " + ToString(frame.index), frame.numpixels, size, 0);
+            delete frame.prev;
+          }, &frame);
+      prev = img;
+    }
+    encoder.Join();
+    delete prev;
+  }
+
+  double total_time = total_timer.stop();
+  PrintBenchmark("total", total_pixels, total_size, total_time, frames.size());
+
+  // decode frames to verify
+  std::cerr << "verifying..." << std::endl;
+  std::vector<uint16_t> prev;
+  for (size_t i = 0; i < frames.size(); i++) {
+    Frame& frame = frames[i];
+
+    total_size += frame.compressed.size();
+
+    const std::vector<uint8_t>& before = frame.orig;
+    const std::vector<uint8_t>& compressed = frame.compressed;
+    size_t pos = 0;
+    std::vector<uint16_t> decompressed =
+        fpvc::DecompressFrame(prev, compressed.data(), compressed.size(), &pos);
+    std::vector<uint8_t> after =
+        fpvc::UnextractFrame(decompressed, xsize, ysize, shift, big_endian);
+    if (before != after) {
+      std::cerr << "Error: roundtrip not equal! " << i << ": "
+                << decompressed.size() << " " << after.size()
+                << " | " << frame.compressed.size() << std::endl;
+      std::exit(1);
+    }
+
+    prev.swap(decompressed);
+  }
+  std::cerr << "ok" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
   if (argc < 6) {
     std::cerr << "Usage: " << argv[0] << " "
-              << "filename xsize ysize shift big_endian [maxframes]\n"
+              << "filename xsize ysize shift big_endian [maxframes] [threads]\n"
               << "    xsize, ysize: frame size in pixels\n"
               << "    big_endian: endianness of the raw input data, 0 or 1\n"
               << "    shift: how many bits to shift left to match MSBs, to"
@@ -170,8 +231,11 @@ int main(int argc, char* argv[]) {
   }
 
   size_t maxframes = 0;
+  size_t numthreads = 4;
 
   if (argc >= 7) maxframes = ParseInt(argv[6]);
+  if (argc >= 8) numthreads = ParseInt(argv[7]);
 
-  TestSet(filename, xsize, ysize, shift, big_endian, maxframes);
+  RunBenchmark(filename, xsize, ysize, shift, big_endian,
+               maxframes, numthreads);
 }
