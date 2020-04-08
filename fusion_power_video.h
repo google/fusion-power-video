@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -25,57 +26,121 @@
 
 namespace fpvc {
 
-std::vector<uint16_t> ExtractFrame(const uint8_t* frame, size_t sizex,
-                                   size_t sizey, int shift, bool big_endian);
+// Helper functions to convert 16-bit image frames to/from the raw file format.
 
-// Compresses a frame single-threaded. Use Encoder for multithreaded compression
-// instead.
-std::vector<uint8_t> CompressFrame(std::vector<uint16_t> img,
-                                   const std::vector<uint16_t>& prev,
-                                   size_t sizex, size_t sizey);
+// Extracts a frame from raw images with 16 bits per pixel, of which 12 bits
+// are used.
+// The input must have xsize * ysize * 2 bytes, the output xsize * ysize values.
+// shift = how much to left shift the value to place the MSB of the 12-bit
+// value in the MSB of the 16-bit output.
+void ExtractFrame(const uint8_t* frame, size_t xsize,
+                  size_t ysize, int shift, bool big_endian,
+                  uint16_t* out);
 
-std::vector<uint16_t> DecompressFrame(const std::vector<uint16_t>& prev,
-                                      const uint8_t* in, size_t size,
-                                      size_t* pos);
+// Converts 16-bit frame back to the original raw file format.
+void UnextractFrame(const uint16_t* img,
+                    size_t xsize, size_t ysize, int shift,
+                    bool big_endian, uint8_t* out);
 
-std::vector<uint8_t> UnextractFrame(const std::vector<uint16_t>& img,
-                                    size_t sizex, size_t sizey, int shift,
-                                    bool big_endian);
+// Streaming decoder
+class StreamingDecoder {
+ public:
+  /* Decodes frames in a streaming fashing. Appends the given bytes to the
+  input buffer. Calls the callback function for all decoded frames that could
+  be decoded so far. The payload is an optional parameter to pass on to the
+  callback. */
+  void Decode(const uint8_t* bytes, size_t size,
+      std::function<void(bool ok, uint16_t* frame, size_t xsize, size_t ysize,
+          void* payload)> callback,
+      void* payload = nullptr);
 
-uint64_t ReadVarint(const uint8_t* data, size_t size, size_t* pos);
+ private:
+  size_t xsize;
+  size_t ysize;
 
-// Multithreaded encoder for CompressFrame.
+  size_t id = 0;
+
+  std::vector<uint16_t> delta_frame;
+
+  std::vector<uint8_t> buffer;
+};
+
+// Rnadom access decoder: requires random access to the entire data file,
+// can decode any frame in any order.
+class RandomAccessDecoder {
+ public:
+   // Parses the header and footer, must be called once with the full data
+   // before using DecodeFrame, xsize, ysize or numframes.
+   bool Init(const uint8_t* data, size_t size);
+
+   // Decodes the frame with the given index. The index must be smaller than
+   // numframes. The output frame must have xsize * ysize values.
+   bool DecodeFrame(size_t index, uint16_t* frame) const;
+
+   size_t xsize() const { return xsize_; }
+   size_t ysize() const { return ysize_; }
+
+   // Returns amount of frames in the full file.
+   size_t numframes() const { return frame_offsets.size(); }
+
+ private:
+  size_t xsize_ = 0;
+  size_t ysize_ = 0;
+  std::vector<uint16_t> delta_frame;
+  std::vector<size_t> frame_offsets;
+  const uint8_t* data_ = nullptr;
+  size_t size_ = 0;
+};
+
+// Multithreaded encoder.
 class Encoder {
  public:
-  Encoder(size_t xsize, size_t ysize, size_t num_threads = 4);
+  // Uses num_threads worker threads, or disables multithreading if num_threads
+  // is 0.
+  Encoder(size_t num_threads = 4);
 
-  // Calls Join if it was not yet called.
-  virtual ~Encoder();
+  // The payload is an optional argument to pass from calls to the callback.
+  typedef std::function<void(const uint8_t* compressed, size_t size,
+      void* payload)> Callback;
+
+  /* Initializes before the first frame, and writes the header bytes by
+  outputting them to the callback.
+  The delta_frame must have xsize * ysize pixels. */
+  void Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
+      Callback callback, void* payload);
 
   /* Encodes a single 16-bit grayscale frame, should be extracted from the raw
-  data using using ExtractFrame. Calls the Callback function when finished
+  data using using ExtractFrame. Calls the callback function when finished
   compressing, asynchronously but guarded and guaranteed in the correct order.
   Payload can optionally be used to bind an extra argument to pass to the
   callback. User must manage memory of img and prev, both must exist until the
-  callback for this frame is called. */
-  void CompressFrame(const std::vector<uint16_t>* img,
-      const std::vector<uint16_t>* prev,
-      void (*Callback)(const uint8_t* compressed, size_t size, void* payload),
-      void* payload = nullptr);
+  callback for this frame is called.
+  Init must be called before compressing the first frame, and Finish must be
+  called after the last frame.*/
+  void CompressFrame(const uint16_t* img, Callback callback,
+      void* payload);
 
-  // Waits and finishes all threads.
-  void Join();
+  /* Waits and finishes all threads, and writes the footer bytes by
+  outputting them to the callback. */
+  void Finish(Callback callback, void* payload);
 
  private:
   struct Task {
-    const std::vector<uint16_t>* frame;
-    const std::vector<uint16_t>* prev;
+    const uint16_t* frame;
     size_t id;
+    Callback callback;
     void* payload;
-    void (*Callback)(const uint8_t* compressed, size_t size, void* payload);
   };
 
   void RunThread();
+
+  std::vector<uint8_t> RunTask(const Task& task);
+
+  // Finalize a task, unlike RunTask this is guaranteed to run in sequential
+  // order and guarded.
+  void FinishTask(const Task& task, std::vector<uint8_t>* compressed);
+
+  void WriteFrameIndex(std::vector<uint8_t>* compressed) const;
 
   std::vector<std::thread*> threads;
   std::mutex m;
@@ -90,10 +155,14 @@ class Encoder {
 
   bool finish = false;
 
-  size_t id = 0;
+  size_t id = 0;  // Unique frame id.
 
-  size_t xsize;
-  size_t ysize;
+  size_t xsize_;
+  size_t ysize_;
+
+  std::vector<uint16_t> delta_frame_;
+  std::vector<size_t> frame_offsets;
+  size_t bytes_written = 0;
 };
 
 }  // namespace fpvc
