@@ -57,46 +57,39 @@ int main(int argc, char* argv[]) {
 
   size_t framesize = xsize * ysize * 2;
 
-  std::vector<uint16_t> prev;
   std::vector<uint16_t> img;
   std::vector<uint8_t> compressed;
-  // A compressed frame should never be larger than this.
-  size_t max_size = framesize * 2 + 1024;
-  std::vector<uint8_t> buffer(max_size + 9);
 
   size_t count = 0;
 
+  fpvc::StreamingDecoder decoder;
+
+  size_t block_size = (1 << 20);
+  std::vector<uint8_t> buffer(block_size);
+  std::vector<uint8_t> raw(xsize * ysize * 2);
+
   while (std::cin) {
     size_t pos = 0;
-    if (!std::cin.read((char*)buffer.data(), 9)) break;
-    size_t size = fpvc::ReadVarint(buffer.data(), 9, &pos);
-    size_t buffer_size = size + pos;
-    if (size > max_size) {
-      std::cerr << "compressed too large frame: " << size << std::endl;
-      return 1;
-    }
-    if (pos + size > 9) {
-      if (!std::cin.read((char*)buffer.data() + 9, pos + size - 9)) {
-        std::cerr << "couldn't read frame from input" << std::endl;
-        return 1;
-      }
+    size_t buffer_size = block_size;
+    if (!std::cin.read((char*)buffer.data(), block_size)) {
+      buffer_size = std::cin.gcount();
+      if (!buffer_size) break;
     }
 
-    pos = 0;
-    std::vector<uint16_t> img =
-        fpvc::DecompressFrame(prev, buffer.data(), buffer_size, &pos);
-    if (img.empty()) {
-      std::cerr << "decompressing frame failed" << std::endl;
-      return 1;
-    }
-
-    std::vector<uint8_t> raw =
-        fpvc::UnextractFrame(img, xsize, ysize, shift, big_endian);
-
-    fwrite(raw.data(), 1, raw.size(), stdout);
-
-    prev.swap(img);
-
-    std::cerr << "extracted frame " << (count++) << std::endl;
+    decoder.Decode(
+        buffer.data(), buffer_size,
+        [shift, big_endian, &count, &raw](bool ok, const uint16_t* image,
+                                          size_t xsize, size_t ysize,
+                                          void* payload) {
+          if (!ok) {
+            std::cerr << "decompressing frame failed" << std::endl;
+            std::exit(1);
+          }
+          fpvc::UnextractFrame(image, xsize, ysize, shift, big_endian,
+                               raw.data());
+          fwrite(raw.data(), 1, raw.size(), stdout);
+          std::cerr << "extracted frame " << (count++) << std::endl;
+        },
+        nullptr);
   }
 }

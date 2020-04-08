@@ -27,7 +27,7 @@ size_t ParseInt(const std::string& s) {
 
 
 int main(int argc, char* argv[]) {
-  if (argc != 5) {
+  if (argc < 5) {
     std::cerr << "Usage: " << argv[0]
               << " xsize ysize shift big_endian < infile > outfile\n"
               << "    xsize, ysize: frame size in pixels\n"
@@ -42,6 +42,10 @@ int main(int argc, char* argv[]) {
   size_t ysize = ParseInt(argv[2]);
   size_t big_endian = ParseInt(argv[3]);
   size_t shift = ParseInt(argv[4]);
+  size_t num_threads = 4;
+  if (argc > 5) {
+    num_threads = ParseInt(argv[5]);
+  }
 
   // There is no theoretical size limit, but this guards against invalid input
   // arguments.
@@ -58,33 +62,37 @@ int main(int argc, char* argv[]) {
 
   std::vector<uint8_t> buffer(framesize);
 
-  size_t num_threads = 4;
 
-  fpvc::Encoder encoder(xsize, ysize, num_threads);
+  fpvc::Encoder encoder(num_threads);
 
-  std::vector<uint16_t>* prev = new std::vector<uint16_t>();
+  bool initialized = false;
+
+  // Callback function for the encoder: writes the data to stdout, and frees
+  // allocated memory given by the payload, if any.
+  auto WriteAndFree = [](const uint8_t* compressed, size_t size,
+                         void* payload) {
+    if (payload) {
+      free(payload);
+    }
+    fwrite(compressed, 1, size, stdout);
+  };
 
   while (std::cin) {
     if (!std::cin.read((char*)buffer.data(), framesize)) break;
 
-    auto img = new std::vector<uint16_t>();
-    *img = fpvc::ExtractFrame(buffer.data(),
-        xsize, ysize, shift, big_endian);
+    // The memory is allocated here, but freed in the callback, since each
+    // thread needs its own memory. The callbacks are guaranteed to be called
+    // after processing of that frame is completely finished.
+    uint16_t* img = (uint16_t*)malloc(xsize * ysize * sizeof(uint16_t));
+    fpvc::ExtractFrame(buffer.data(), xsize, ysize, shift, big_endian, img);
 
-    encoder.CompressFrame(img, prev,
-        [](const uint8_t* compressed, size_t size, void* payload) {
-          fwrite(compressed, 1, size, stdout);
+    if (!initialized) {
+      initialized = true;
+      encoder.Init(img, xsize, ysize, WriteAndFree, nullptr);
+    }
 
-          // The previous frame is guaranteed to have been output already, and
-          // the current frame was the last frame that depended on it, so
-          // delete the previous frame at this point.
-          auto* prev = reinterpret_cast<std::vector<uint16_t>*>(payload);
-          delete prev;
-        }, prev);
-
-    prev = img;
+    encoder.CompressFrame(img, WriteAndFree, img);
   }
 
-  encoder.Join();
-  delete prev;
+  encoder.Finish(WriteAndFree, nullptr);
 }

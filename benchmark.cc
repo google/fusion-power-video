@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Benchmark and roundtrip test
+
 #include <sys/time.h>
 
 #include <fstream>
@@ -34,12 +36,13 @@ size_t ParseInt(const std::string& s) {
   return result;
 }
 
-// NOTE: For testing only, does not check if file is bounded.
-std::vector<unsigned char> LoadFile(const std::string& filename) {
+std::vector<unsigned char> LoadFile(const std::string& filename,
+    size_t maxsize) {
   std::ifstream f(filename, std::ios::binary);
   if (!f) return {};
   f.seekg(0, std::ios::end);
   size_t size = f.tellg();
+  if (maxsize > 0 && size > maxsize) size = maxsize;
   f.seekg(0, std::ios::beg);
   std::vector<unsigned char> result(size);
   f.read(reinterpret_cast<char*>(result.data()), size);
@@ -66,24 +69,30 @@ void PrintBenchmark(const std::string& label, size_t pixels, size_t size,
                     double time = 0, size_t numframes = 0) {
   double speed = pixels / time / 1000000.0;
   double bpp = size / (double)pixels * 8;
-  std::cout << label << ": " << size << " bytes, " << bpp << " bpp";
+  std::cerr << label << ": " << size << " bytes";
+  if (pixels) {
+    std::cerr << ", " << bpp << " bpp";
+  }
   if (numframes > 1) {
-    std::cout << ", bytes per frame: " << ((double)size / numframes);
+    std::cerr << ", bytes per frame: " << ((double)size / numframes);
   }
   if (time > 0) {
-    std::cout << ", time: " << (time * 1000) << " ms"
+    std::cerr << ", time: " << (time * 1000) << " ms"
               << ", speed: " << speed << " MP/s";
-    std::cout << ", frames per second: " << ((double)numframes / time);
+    std::cerr << ", frames per second: " << ((double)numframes / time);
   }
-  std::cout <<  std::endl;
+  std::cerr << std::endl;
 }
 
+// Runs encoder benchmark and does roundtrip test with both the streaming
+// decoder and the random access decoder.
 void RunBenchmark(const std::string& filename,
                   size_t xsize, size_t ysize, int shift,
                   bool big_endian, size_t maxframes, size_t num_threads) {
-  std::vector<unsigned char> raw = LoadFile(filename);
+  size_t maxsize = maxframes * xsize * ysize * 2;
+  std::vector<unsigned char> raw = LoadFile(filename, maxsize);
   if (raw.empty()) {
-    std::cout << "couldn't load " << filename << std::endl;
+    std::cerr << "couldn't load " << filename << std::endl;
     std::exit(1);
   }
 
@@ -105,8 +114,7 @@ void RunBenchmark(const std::string& filename,
   struct Frame {
     std::vector<uint8_t> orig;
     std::vector<uint8_t> compressed;
-    std::vector<uint16_t>* prev;
-    size_t numpixels;
+    std::vector<uint16_t>* img;
     size_t index;
     size_t* total_size;
   };
@@ -117,86 +125,140 @@ void RunBenchmark(const std::string& filename,
     frame.orig.assign(raw.data() + framesize * i,
                       raw.data() + framesize * (i + 1));
     frame.index = i;
-    frame.numpixels = numpixels;
     frame.total_size = &total_size;
-    total_pixels += frame.numpixels;
+    total_pixels += numpixels;
   }
 
+  std::vector<uint16_t> delta_frame(xsize * ysize);
+  fpvc::ExtractFrame(raw.data(), xsize, ysize, shift, big_endian,
+                     delta_frame.data());
+  std::vector<uint8_t> header;
+  std::vector<uint8_t> footer;
 
+  // Benchmark the encoder
 
   total_timer.start();
-
-  if (num_threads <= 1) {
-    // Singlethreaded benchmark
-    std::vector<uint16_t> img;
-    std::vector<uint16_t> prev;
-    std::vector<uint8_t> compressed;
+  {
+    fpvc::Encoder encoder(num_threads);
+    encoder.Init(delta_frame.data(), xsize, ysize, [&header, numpixels](
+        const uint8_t* compressed, size_t size, void* payload) {
+      header.assign(compressed, compressed + size);
+      PrintBenchmark("header", 0, size, 0);
+    }, nullptr);
     for (size_t i = 0; i < frames.size(); i++) {
       Frame& frame = frames[i];
-      BenchmarkTime t;
-      t.start();
-      img = fpvc::ExtractFrame(frame.orig.data(), xsize, ysize, shift,
-                               big_endian);
-      frame.compressed = fpvc::CompressFrame(img, prev, xsize, ysize);
-      double time = t.stop();
-      PrintBenchmark("frame " + ToString(i), numpixels, compressed.size(),
-                     time);
-      *frame.total_size += compressed.size();
-      prev.swap(img);
-    }
-  } else {
-    // Multithreaded benchmark
-    fpvc::Encoder encoder(xsize, ysize, num_threads);
-    std::vector<uint16_t>* prev = new std::vector<uint16_t>();
-    for (size_t i = 0; i < frames.size(); i++) {
-      Frame& frame = frames[i];
-      auto img = new std::vector<uint16_t>();
-      *img = fpvc::ExtractFrame(
-          raw.data() + framesize * i, xsize, ysize, shift, big_endian);
-      frame.prev = prev;
-      encoder.CompressFrame(img, prev,
-          [](const uint8_t* compressed, size_t size, void* payload){
+      std::vector<uint16_t>* img = new std::vector<uint16_t>(xsize * ysize);
+      fpvc::ExtractFrame(raw.data() + framesize * i, xsize, ysize, shift,
+                         big_endian, img->data());
+      frame.img = img;
+      encoder.CompressFrame(img->data(),
+          [numpixels](const uint8_t* compressed, size_t size, void* payload) {
             Frame& frame = *reinterpret_cast<Frame*>(payload);
             frame.compressed.assign(compressed, compressed + size);
             *frame.total_size += size;
+            delete frame.img;
             PrintBenchmark(
-                "frame " + ToString(frame.index), frame.numpixels, size, 0);
-            delete frame.prev;
+                "frame " + ToString(frame.index), numpixels, size, 0);
           }, &frame);
-      prev = img;
     }
-    encoder.Join();
-    delete prev;
+    encoder.Finish([&footer](
+        const uint8_t* compressed, size_t size, void* payload) {
+      footer.assign(compressed, compressed + size);
+      PrintBenchmark("footer", 0, size, 0);
+    }, nullptr);
   }
 
   double total_time = total_timer.stop();
   PrintBenchmark("total", total_pixels, total_size, total_time, frames.size());
 
-  // decode frames to verify
-  std::cerr << "verifying..." << std::endl;
-  std::vector<uint16_t> prev;
+
+  std::vector<uint8_t> compressed = header;
   for (size_t i = 0; i < frames.size(); i++) {
-    Frame& frame = frames[i];
+    compressed.insert(compressed.end(),
+        frames[i].compressed.begin(), frames[i].compressed.end());
+  }
+  compressed.insert(compressed.end(), footer.begin(), footer.end());
 
-    total_size += frame.compressed.size();
+  // Test the streaming decoder
 
-    const std::vector<uint8_t>& before = frame.orig;
-    const std::vector<uint8_t>& compressed = frame.compressed;
+  {
+    std::cerr << "verifying streaming decoder..." << std::endl;
+    fpvc::StreamingDecoder decoder;
+    size_t frames_decoded = 0;
+    size_t blocksize = 65536;
     size_t pos = 0;
-    std::vector<uint16_t> decompressed =
-        fpvc::DecompressFrame(prev, compressed.data(), compressed.size(), &pos);
-    std::vector<uint8_t> after =
-        fpvc::UnextractFrame(decompressed, xsize, ysize, shift, big_endian);
-    if (before != after) {
-      std::cerr << "Error: roundtrip not equal! " << i << ": "
-                << decompressed.size() << " " << after.size()
-                << " | " << frame.compressed.size() << std::endl;
+    while (pos < compressed.size()) {
+      size_t size = (pos + blocksize > compressed.size()) ?
+          (compressed.size() - pos) : blocksize;
+      decoder.Decode(&compressed[pos], size,
+          [shift, big_endian, framesize, &frames_decoded, &frames](
+              bool ok, const uint16_t* image,
+              size_t xsize, size_t ysize, void* payload) {
+        if (!ok) {
+          std::cerr << "StreamingDecoder decode failed" << std::endl;
+          std::exit(1);
+        }
+        if (frames_decoded >= frames.size()) {
+          std::cerr << "Too many frames" << std::endl;
+          std::exit(1);
+        }
+        const Frame& frame = frames[frames_decoded++];
+        const std::vector<uint8_t>& before = frame.orig;
+        std::vector<uint8_t> after(framesize);
+        fpvc::UnextractFrame(image, xsize, ysize, shift, big_endian,
+                             after.data());
+        if (before != after) {
+          std::cerr << "Error: roundtrip not equal! " << frame.index << ": "
+                    << after.size() << " " << frame.compressed.size()
+                    << std::endl;
+          std::exit(1);
+        }
+      });
+      pos += size;
+    }
+    if (frames_decoded != frames.size()) {
+      std::cerr << "Error: not all frames decoded: "
+                << frames_decoded << " / " << frames.size() << std::endl;
+      std::exit(1);
+    } else {
+      std::cerr << "ok" << std::endl;
+    }
+  }
+
+  // Test the random access decoder
+
+  std::cerr << "verifying random access decoder..." << std::endl;
+  {
+    fpvc::RandomAccessDecoder decoder;
+    if (!decoder.Init(compressed.data(), compressed.size())) {
+      std::cerr << "RandomAccessDecoder::Init failed" << std::endl;
       std::exit(1);
     }
-
-    prev.swap(decompressed);
+    if (decoder.numframes() != frames.size() ||
+        decoder.xsize() != xsize || decoder.ysize() != ysize) {
+      std::cerr << "RandomAccessDecoder::Init mismatch" << std::endl;
+      std::exit(1);
+    }
+    for (size_t i = 0; i < frames.size(); i++) {
+      Frame& frame = frames[i];
+      const std::vector<uint8_t>& before = frame.orig;
+      std::vector<uint16_t> image(xsize * ysize);
+      if (!decoder.DecodeFrame(i, image.data())) {
+        std::cerr << "RandomAccessDecoder::DecodeFrame failed" << std::endl;
+        std::exit(1);
+      }
+      std::vector<uint8_t> after(framesize);
+      fpvc::UnextractFrame(image.data(), xsize, ysize, shift, big_endian,
+                           after.data());
+      if (before != after) {
+        std::cerr << "Error: roundtrip not equal! " << frame.index << ": "
+                  << after.size() << " " << frame.compressed.size()
+                  << std::endl;
+        std::exit(1);
+      }
+    }
+    std::cerr << "ok" << std::endl;
   }
-  std::cerr << "ok" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
