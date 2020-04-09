@@ -24,6 +24,100 @@
 #include <brotli/decode.h>
 #include <brotli/encode.h>
 
+/*
+Description of the file format:
+
+A fusion power video file contains 1 or more grayscale 16-bit image frames, and
+uses the format described below. To decode a frame, only the main header, the
+one static delta frame and compressed data for the frame itself are needed,
+frames do not depend on other frames. Each format section below describes the
+concatenation of one or more streams or values encoded in bytes (octets),
+possibly referring to sub-sections to further define a stream, culminating in
+the full file format.
+
+full file format:
+-header: see header format below
+-encoded delta frame: see frame format below
+-one or more frames: per frame:
+--encoded frame: see frame format below
+-footer: see footer format (frame index) below
+Note: the encoder can only choose a single delta frame that can be used for
+prediction of all the frames (so frames don't depend on each other, only on
+the one delta frame); the encoder should make a good choice of delta frame
+for good compression (example: the first frame, assuming the camera remains
+static and the first frame is a full representative image).
+
+header format:
+-4 bytes: xsize (little endian 32-bit integer)
+-4 bytes: ysize (little endian 32-bit integer)
+
+frame format:
+-4 bytes: compressed size of entire frame, including these 4 bytes (little
+ endian 32-bit integer)
+-1 byte: flags, see below
+-variable amount of bytes: brotli compressed low bytes
+-variable amount of bytes: brotli compressed high bytes
+Note: the brotli decoder knows where the first brotli stream ends so the
+split point is known during decoding. The brotli format is specified in
+RFC 7932. See below for the complete procedure to decode a frame.
+
+footer format (frame index):
+-4 bytes: size of this entire footer, including these 4 bytes (little
+ endian 32-bit integer)
+-1 byte: flags, must have value 2
+-per frame:
+--8 bytes: offset from the start of the file to the start of this frame (little
+  endian 64-bit integer)
+-8 bytes: amount of frames
+Note: if the full file is available, the decoder can compute the start of the
+footer by parsing the last 8 bytes, rather than jumping frame by frame through
+the entire file from the front, in case one wants to decode only a particular
+frame.
+
+flags meanings:
+-flags & 1: this must be true for the delta frame immediately after the header,
+ and false for all other frames. Indicates this is not a frame to be decoded,
+ but the delta frame that all other frames can use as base for prediction.
+-flags & 2: this must be true for the footer (frame index), and must be false
+ for all frames.
+-flags & 4: iff true, delta frame prediction is enabled. This must be false if
+ this frame is the delta frame.
+-flags & 8: iff true, vertical prediction is enabled
+-flags & 16: iff true, horizontal prediction is enabled
+
+procedure to decode a frame:
+-given the xsize and ysize from the header, a frame has xsize columns and
+ ysize rows.
+-brotli decompress the low bytes. These correspond to the LSB's of the 16-bit
+ image.
+-brotli decompress the high bytes. These correspond to the MSB's of the 16-bit
+ image.
+-Note: the brotli format is specified in RFC 7932
+-Note: the format has two concatenated brotli streams in a row, their individual
+ sizes are not encoded in this file format, but they are implicitely present
+ in the brotli stream, and the brotli decoder knows where the first stream ends.
+ The second stream must end at the last byte of this encoded frame, if not the
+ file is invalid.
+-Note: each brotli-decoded byte stream has xsize * ysize bytes, if not the file
+ is invalid.
+-combine the low and high byte streams into a single xsize*ysize 16-bit frame of
+ unsigned 16-bit integers.
+-if horizontal prediction is enabled, then for all pixels except those of the
+ leftmost column, compute: new_value = old_value + new_value_left, with
+ new_value_left the new value of the pixel left of this one. The addition
+ should wrap on overflow.
+-if vertical prediction is enabled, then for all pixels except those of the
+ topmost row, compute: new_value = old_value + new_value_up, similar to the
+ horizontal prediction but with up refering to the pixel above the current
+ pixel.
+-if delta prediction is enabled, then for all pixels compute:
+ new_value = old_value + delta_frame_value - 32768, similar to the
+ horizontal prediction but with delta_frame_value the value at the corresponding
+ position from the delta frame.
+-the resulting 16-bit image may represent 12-bit data (or another bit amount),
+ in that case, the least significant bits will be set to 0.
+*/
+
 namespace fpvc {
 namespace {
 
@@ -520,7 +614,6 @@ bool RandomAccessDecoder::Init(const uint8_t* data, size_t size) {
   }
   if (delta_frame.size() != xsize_ * ysize_) return FAILURE();
 
-
   // Parse the frame index
   size_t num_frames = ReadUint64LE(data + size - 8);
   size_t footer_size = 5 + 8 * num_frames + 8;
@@ -616,12 +709,14 @@ void Encoder::CompressFrame(const uint16_t* img,
     q_in.push(task);
     q_out.push(task);
   }
-  cv_in.notify_one();
+  cv_in.notify_all();
 
   {
     std::unique_lock<std::mutex> l(m);
-    // Wait if the queue gets too full to prevent out of memory.
-    cv_main.wait(l, [this]{return q_out.size() < threads.size() * 4;});
+    // Wait if the queue is too full so that only the maximum promised amount
+    // of simultaneous tasks needing different input memory buffers is active
+    // or queued.
+    cv_main.wait(l, [this]{return q_out.size() < MaxQueued();});
   }
 }
 
@@ -630,6 +725,14 @@ std::vector<uint8_t> Encoder::RunTask(const Task& task) {
   fpvc::CompressFrame(delta_frame_.data(), task.frame,
       xsize_, ysize_, &compressed);
   return compressed;
+}
+
+size_t Encoder::MaxQueued() const {
+  // The result must be at least as large as the amount of threads to be able
+  // to use them all, must be at least 1 if there are no threads, and can be
+  // made larger to potentially allow the main thread to queue in more input
+  // data if the worker threads are all busy.
+  return threads.empty() ? 1 : (threads.size() + (threads.size() + 1) / 2);
 }
 
 void Encoder::FinishTask(const Task& task, std::vector<uint8_t>* compressed) {
@@ -675,9 +778,8 @@ void Encoder::RunThread() {
       cv_out.wait(l, [&task, this]{
         return q_out.front().id == task.id;
       });
-      q_out.pop();
-
       FinishTask(task, &compressed);
+      q_out.pop();
     }
     // Finished outputting
     cv_out.notify_all();

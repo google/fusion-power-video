@@ -67,32 +67,35 @@ int main(int argc, char* argv[]) {
 
   bool initialized = false;
 
-  // Callback function for the encoder: writes the data to stdout, and frees
-  // allocated memory given by the payload, if any.
-  auto WriteAndFree = [](const uint8_t* compressed, size_t size,
+  // Rotate through multiple memory buffers for the input image such that all
+  // threads / queued tasks have their own buffer.
+  size_t num_buffers = encoder.MaxQueued();
+  std::vector<uint16_t> buffers[num_buffers];
+  for (size_t i = 0; i < num_buffers; i++) {
+    buffers[i].resize(xsize * ysize);
+  }
+  size_t buffer_index = 0;
+
+  // Callback function for all stages of the encoder that output data.
+  auto WriteFunction = [](const uint8_t* compressed, size_t size,
                          void* payload) {
-    if (payload) {
-      free(payload);
-    }
     fwrite(compressed, 1, size, stdout);
   };
 
   while (std::cin) {
     if (!std::cin.read((char*)buffer.data(), framesize)) break;
 
-    // The memory is allocated here, but freed in the callback, since each
-    // thread needs its own memory. The callbacks are guaranteed to be called
-    // after processing of that frame is completely finished.
-    uint16_t* img = (uint16_t*)malloc(xsize * ysize * sizeof(uint16_t));
+    uint16_t* img = buffers[buffer_index].data();
     fpvc::ExtractFrame(buffer.data(), xsize, ysize, shift, big_endian, img);
 
     if (!initialized) {
       initialized = true;
-      encoder.Init(img, xsize, ysize, WriteAndFree, nullptr);
+      encoder.Init(img, xsize, ysize, WriteFunction, nullptr);
     }
 
-    encoder.CompressFrame(img, WriteAndFree, img);
+    encoder.CompressFrame(img, WriteFunction, nullptr);
+    buffer_index = (buffer_index + 1) % num_buffers;
   }
 
-  encoder.Finish(WriteAndFree, nullptr);
+  encoder.Finish(WriteFunction, nullptr);
 }

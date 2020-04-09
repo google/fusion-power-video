@@ -109,20 +109,27 @@ class Encoder {
   void Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
       Callback callback, void* payload);
 
-  /* Encodes a single 16-bit grayscale frame, should be extracted from the raw
-  data using using ExtractFrame. Calls the callback function when finished
-  compressing, asynchronously but guarded and guaranteed in the correct order.
-  Payload can optionally be used to bind an extra argument to pass to the
-  callback. User must manage memory of img and prev, both must exist until the
-  callback for this frame is called.
+  /* Queues a single 16-bit grayscale frame for encoding.
+  The frame should be in the format extracted from the raw data using using
+  ExtractFrame.
+  Calls the callback function when finished compressing, asynchronously but
+  guarded and guaranteed in the correct order. The payload can optionally be
+  used to bind an extra argument to pass to the callback.
+  User must manage memory of img: it must exist until the callback for this
+  frame is called. There can exist up to MaxQueued() tasks at the same time so
+  at least that many seperate img memory buffers have to exist at the same time.
   Init must be called before compressing the first frame, and Finish must be
-  called after the last frame.*/
-  void CompressFrame(const uint16_t* img, Callback callback,
-      void* payload);
+  called after the last frame was queued.*/
+  void CompressFrame(const uint16_t* img, Callback callback, void* payload);
 
   /* Waits and finishes all threads, and writes the footer bytes by
   outputting them to the callback. */
   void Finish(Callback callback, void* payload);
+
+  /* Returns the max amount of frames that can be queued and/or being processed
+  at the same time for multithreaded processing. This could be larger than the
+  amount of worker threads. */
+  size_t MaxQueued() const;
 
  private:
   struct Task {
