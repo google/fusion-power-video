@@ -114,7 +114,6 @@ void RunBenchmark(const std::string& filename,
   struct Frame {
     std::vector<uint8_t> orig;
     std::vector<uint8_t> compressed;
-    std::vector<uint16_t>* img;
     size_t index;
     size_t* total_size;
   };
@@ -140,6 +139,16 @@ void RunBenchmark(const std::string& filename,
   total_timer.start();
   {
     fpvc::Encoder encoder(num_threads);
+
+    // Rotate through multiple memory buffers for the input image such that all
+    // threads / queued tasks have their own buffer.
+    size_t num_buffers = encoder.MaxQueued();
+    std::vector<uint16_t> buffers[num_buffers];
+    for (size_t i = 0; i < num_buffers; i++) {
+      buffers[i].resize(xsize * ysize);
+    }
+    size_t buffer_index = 0;
+
     encoder.Init(delta_frame.data(), xsize, ysize, [&header, numpixels](
         const uint8_t* compressed, size_t size, void* payload) {
       header.assign(compressed, compressed + size);
@@ -147,19 +156,18 @@ void RunBenchmark(const std::string& filename,
     }, nullptr);
     for (size_t i = 0; i < frames.size(); i++) {
       Frame& frame = frames[i];
-      std::vector<uint16_t>* img = new std::vector<uint16_t>(xsize * ysize);
+      uint16_t* img = buffers[buffer_index].data();
       fpvc::ExtractFrame(raw.data() + framesize * i, xsize, ysize, shift,
-                         big_endian, img->data());
-      frame.img = img;
-      encoder.CompressFrame(img->data(),
+                         big_endian, img);
+      encoder.CompressFrame(img,
           [numpixels](const uint8_t* compressed, size_t size, void* payload) {
             Frame& frame = *reinterpret_cast<Frame*>(payload);
             frame.compressed.assign(compressed, compressed + size);
             *frame.total_size += size;
-            delete frame.img;
             PrintBenchmark(
                 "frame " + ToString(frame.index), numpixels, size, 0);
           }, &frame);
+      buffer_index = (buffer_index + 1) % num_buffers;
     }
     encoder.Finish([&footer](
         const uint8_t* compressed, size_t size, void* payload) {
