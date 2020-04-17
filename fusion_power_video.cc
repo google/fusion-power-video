@@ -451,7 +451,7 @@ bool DecompressFrame(const uint16_t* delta_frame,
 
   // Error: sizes don't match image size
   if (low.size() != numpixels) return FAILURE();
-  if (low.size() != numpixels) return FAILURE();
+  if (high.size() != numpixels) return FAILURE();
 
   for (size_t i = 0; i < numpixels; i++) {
     img[i] = (high[i] << 8) | low[i];
