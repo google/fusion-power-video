@@ -432,6 +432,7 @@ bool DecompressFrame(const uint16_t* delta_frame,
   if (*pos + expected_size > size) return FAILURE();
 
   uint8_t flags = in[*pos + 4];
+  bool is_delta = flags & 1;
   bool use_delta = flags & 4;
   bool use_vertical = flags & 8;
   bool use_horizontal = flags & 16;
@@ -442,7 +443,9 @@ bool DecompressFrame(const uint16_t* delta_frame,
   size_t numpixels = xsize * ysize;
   // Error: want to use inter-frame delta but delta_frame frame not supplied.
   if (use_delta && !delta_frame) return FAILURE();
-
+  // Error: want to decompress delta frame, but requested to use delta prediction
+  // and/or supplied a delta frame
+  if (is_delta && (use_delta || !!delta_frame)) return FAILURE();
   std::vector<uint8_t> low;
   if (!BrotliDecompress(in, size, pos, &low)) return FAILURE();
 
@@ -538,6 +541,12 @@ void StreamingDecoder::Decode(const uint8_t* bytes, size_t size,
     ysize = ReadUint32LE(in + 4);
     pos += 8;
 
+    // file format requires the delta frame immediately after the header
+    // something else is invalid here
+    if (in[pos+4] & 1 == 0) {
+      callback(FAILURE(), nullptr, 0, 0, payload);
+    }
+
     size_t deltasize = ReadUint32LE(in + pos);
     if (deltasize + pos <= insize) {
       delta_frame.resize(xsize * ysize);
@@ -557,6 +566,11 @@ void StreamingDecoder::Decode(const uint8_t* bytes, size_t size,
 
     size_t framesize = ReadUint32LE(in + pos);
     if (pos + framesize > insize) break;
+    // delta frame in unexpected position.
+    if (in[pos + 4] & 1) {
+      callback(FAILURE(), nullptr, 0, 0, payload);
+      return;
+    }
     if (in[pos + 4] & 2) break;  // Frame index reached, end of frames.
 
 
@@ -608,6 +622,12 @@ bool RandomAccessDecoder::Init(const uint8_t* data, size_t size) {
   size_t delta_frame_size = ReadUint32LE(data + 8);
   size_t pos = 8;
   delta_frame.resize(xsize_ * ysize_);
+  // file format requires the delta frame immediately after the header
+  // something else is invalid here
+  if (data[pos+4] & 1 == 0) {
+    return FAILURE();
+  }
+
   if (!fpvc::DecompressFrame({}, data, size, xsize_, ysize_, &pos,
       delta_frame.data())) {
     return FAILURE();
@@ -638,6 +658,7 @@ bool RandomAccessDecoder::DecodeFrame(size_t index, uint16_t* frame) const {
   if (offset > size_) return FAILURE();
   size_t frame_size = ReadUint32LE(data_ + offset);
   if (offset + frame_size > size_) return FAILURE();
+  if (data_[offset + 4] & 1) return FAILURE();
   return fpvc::DecompressFrame(delta_frame.data(),
       data_, size_, xsize_, ysize_, &offset, frame);
 }
@@ -665,6 +686,7 @@ void Encoder::Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
   WriteUint32LE(xsize, compressed.data() + 0);
   WriteUint32LE(ysize, compressed.data() + 4);
   fpvc::CompressFrame(nullptr, delta_frame, xsize, ysize, &compressed);
+  compressed.data()[12] |= 1; // mark as the delta frame
   bytes_written = compressed.size();
   callback(compressed.data(), compressed.size(), payload);
 }
