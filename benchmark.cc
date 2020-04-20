@@ -84,6 +84,25 @@ void PrintBenchmark(const std::string& label, size_t pixels, size_t size,
   std::cerr << std::endl;
 }
 
+// Renders a downscaled version of the preview in the terminal for testing.
+void RenderPreview(const uint8_t* preview, size_t xsize, size_t ysize) {
+  for(size_t y = 0; y < ysize; y += 4) {
+    for(size_t x = 0; x < xsize; x += 4) {
+      int v = preview[y * xsize + x];
+      if(v < 16) std::cerr << ' ';
+      else if(v < 24) std::cerr << '.';
+      else if(v < 32) std::cerr << ',';
+      else if(v < 48) std::cerr << ':';
+      else if(v < 64) std::cerr << ';';
+      else if(v < 128) std::cerr << '+';
+      else if(v < 192) std::cerr << '=';
+      else std::cerr << '#';
+    }
+    std::cerr << std::endl;
+  }
+  std::cerr << std::endl;
+}
+
 // Runs encoder benchmark and does roundtrip test with both the streaming
 // decoder and the random access decoder.
 void RunBenchmark(const std::string& filename,
@@ -107,7 +126,6 @@ void RunBenchmark(const std::string& filename,
 
   maxframes = (maxframes == 0) ? num : (std::min(num, maxframes));
 
-  size_t total_size = 0;
   size_t total_pixels = 0;
   BenchmarkTime total_timer;
 
@@ -115,7 +133,6 @@ void RunBenchmark(const std::string& filename,
     std::vector<uint8_t> orig;
     std::vector<uint8_t> compressed;
     size_t index;
-    size_t* total_size;
   };
   std::vector<Frame> frames(maxframes);
 
@@ -124,7 +141,6 @@ void RunBenchmark(const std::string& filename,
     frame.orig.assign(raw.data() + framesize * i,
                       raw.data() + framesize * (i + 1));
     frame.index = i;
-    frame.total_size = &total_size;
     total_pixels += numpixels;
   }
 
@@ -163,7 +179,6 @@ void RunBenchmark(const std::string& filename,
           [numpixels](const uint8_t* compressed, size_t size, void* payload) {
             Frame& frame = *reinterpret_cast<Frame*>(payload);
             frame.compressed.assign(compressed, compressed + size);
-            *frame.total_size += size;
             PrintBenchmark(
                 "frame " + ToString(frame.index), numpixels, size, 0);
           }, &frame);
@@ -175,10 +190,7 @@ void RunBenchmark(const std::string& filename,
       PrintBenchmark("footer", 0, size, 0);
     }, nullptr);
   }
-
   double total_time = total_timer.stop();
-  PrintBenchmark("total", total_pixels, total_size, total_time, frames.size());
-
 
   std::vector<uint8_t> compressed = header;
   for (size_t i = 0; i < frames.size(); i++) {
@@ -187,8 +199,10 @@ void RunBenchmark(const std::string& filename,
   }
   compressed.insert(compressed.end(), footer.begin(), footer.end());
 
-  // Test the streaming decoder
+  PrintBenchmark("total", total_pixels, compressed.size(), total_time,
+      frames.size());
 
+  // Test the streaming decoder
   {
     std::cerr << "verifying streaming decoder..." << std::endl;
     fpvc::StreamingDecoder decoder;
@@ -234,9 +248,8 @@ void RunBenchmark(const std::string& filename,
   }
 
   // Test the random access decoder
-
-  std::cerr << "verifying random access decoder..." << std::endl;
   {
+    std::cerr << "verifying random access decoder..." << std::endl;
     fpvc::RandomAccessDecoder decoder;
     if (!decoder.Init(compressed.data(), compressed.size())) {
       std::cerr << "RandomAccessDecoder::Init failed" << std::endl;
@@ -247,6 +260,10 @@ void RunBenchmark(const std::string& filename,
       std::cerr << "RandomAccessDecoder::Init mismatch" << std::endl;
       std::exit(1);
     }
+
+    size_t pxsize = decoder.preview_xsize();
+    size_t pysize = decoder.preview_ysize();
+
     for (size_t i = 0; i < frames.size(); i++) {
       Frame& frame = frames[i];
       const std::vector<uint8_t>& before = frame.orig;
@@ -255,6 +272,16 @@ void RunBenchmark(const std::string& filename,
         std::cerr << "RandomAccessDecoder::DecodeFrame failed" << std::endl;
         std::exit(1);
       }
+      std::vector<uint8_t> preview(pxsize * pysize);
+      if (!decoder.DecodePreview(i, preview.data())) {
+        std::cerr << "RandomAccessDecoder::DecodePreview failed" << std::endl;
+        std::exit(1);
+      }
+
+      // Uncomment this to manually verify previews. This prints a lot of lines
+      // in the terminal.
+      //RenderPreview(preview.data(), pxsize, pysize);
+
       std::vector<uint8_t> after(framesize);
       fpvc::UnextractFrame(image.data(), xsize, ysize, shift, big_endian,
                            after.data());
@@ -301,7 +328,7 @@ int main(int argc, char* argv[]) {
   }
 
   size_t maxframes = 0;
-  size_t numthreads = 4;
+  size_t numthreads = 8;
 
   if (argc >= 7) maxframes = ParseInt(argv[6]);
   if (argc >= 8) numthreads = ParseInt(argv[7]);

@@ -77,8 +77,14 @@ class RandomAccessDecoder {
    // numframes. The output frame must have xsize * ysize values.
    bool DecodeFrame(size_t index, uint16_t* frame) const;
 
+   bool DecodePreview(size_t index, uint8_t* preview) const;
+
    size_t xsize() const { return xsize_; }
    size_t ysize() const { return ysize_; }
+
+   // Returns the dimensions of preview images
+   size_t preview_xsize() const { return (xsize_ + 7) / 8; }
+   size_t preview_ysize() const { return (ysize_ + 7) / 8; }
 
    // Returns amount of frames in the full file.
    size_t numframes() const { return frame_offsets.size(); }
@@ -97,7 +103,7 @@ class Encoder {
  public:
   // Uses num_threads worker threads, or disables multithreading if num_threads
   // is 0.
-  Encoder(size_t num_threads = 4);
+  Encoder(size_t num_threads = 8);
 
   // The payload is an optional argument to pass from calls to the callback.
   typedef std::function<void(const uint8_t* compressed, size_t size,

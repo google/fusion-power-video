@@ -27,23 +27,26 @@
 /*
 Description of the file format:
 
-A fusion power video file contains 1 or more grayscale 16-bit image frames, and
-uses the format described below. To decode a frame, only the main header, the
-one static delta frame and compressed data for the frame itself are needed,
-frames do not depend on other frames. Each format section below describes the
-concatenation of one or more streams or values encoded in bytes (octets),
-possibly referring to sub-sections to further define a stream, culminating in
-the full file format.
+A fusion power video file contains 1 or more grayscale 16-bit image frames. The
+format contains one static delta frame used for compression of all frames,
+and a frame index with pointers to all individual frames in the footer. Each
+frame also contains a smaller preview image. To decode a frame, only the main
+header, the one static delta frame and compressed data for the frame itself are
+needed, frames do not depend on other frames.
+
+Each format section below describes the concatenation of one or more streams or
+values encoded in bytes (octets), possibly referring to sub-sections to further
+define a stream, culminating in the full file format.
 
 full file format:
 -header: see header format below
--encoded delta frame: see frame format below
--one or more frames: per frame:
---encoded frame: see frame format below
+-encoded delta frame: see delta frame format below
+-one or more times: encoded frame: see frame format below
 -footer: see footer format (frame index) below
-Note: the encoder can only choose a single delta frame that can be used for
+Note: the encoder can only choose a single delta frame which can be used for
 prediction of all the frames (so frames don't depend on each other, only on
-the one delta frame); the encoder should make a good choice of delta frame
+the one delta frame); this image itself does not have to be the same as any
+of the actual frames; the encoder should make a good choice of delta frame
 for good compression (example: the first frame, assuming the camera remains
 static and the first frame is a full representative image).
 
@@ -51,20 +54,41 @@ header format:
 -4 bytes: xsize (little endian 32-bit integer)
 -4 bytes: ysize (little endian 32-bit integer)
 
-frame format:
+delta frame format:
 -4 bytes: compressed size of entire frame, including these 4 bytes (little
  endian 32-bit integer)
--1 byte: flags, see below
--variable amount of bytes: brotli compressed low bytes
+-1 byte: chunk flags, must have value 1
+-remaining bytes: the delta frame, encoded in the format described under image
+ format below, without previous delta frame.
+
+frame format:
+-4 bytes: compressed size of entire frame, including these 4 bytes (little
+ endian 32-bit integer), preview and main image
+-1 byte: chunk flags, must have value 0
+-4 bytes: preview_size: compressed size of preview image, excluding these 4
+ bytes
+-preview_size bytes: preview image in the image format, see image format below.
+ This preview image is encoded without any delta frame, and its xsize and ysize
+ are 1/8th of the respective main xsize and ysize, rounded up. The preview
+ image should only use the 6 most significant bits of each 16-bit sample and
+ leave all other 10 bits at zero.
+-remaining bytes: the full frame encoded in the image format, see image format
+ below
+
+image format, given an xsize, ysize and an optional delta frame of the same
+ dimensions:
+-1 byte: image flags, see below
+-variable amount of bytes: brotli compressed low bytes, or empty if not present
+ (see flags)
 -variable amount of bytes: brotli compressed high bytes
 Note: the brotli decoder knows where the first brotli stream ends so the
 split point is known during decoding. The brotli format is specified in
-RFC 7932. See below for the complete procedure to decode a frame.
+RFC 7932. See below for the complete procedure to decode an image.
 
 footer format (frame index):
 -4 bytes: size of this entire footer, including these 4 bytes (little
  endian 32-bit integer)
--1 byte: flags, must have value 2
+-1 byte: chunk flags, must have value 2
 -per frame:
 --8 bytes: offset from the start of the file to the start of this frame (little
   endian 64-bit integer)
@@ -74,22 +98,25 @@ footer by parsing the last 8 bytes, rather than jumping frame by frame through
 the entire file from the front, in case one wants to decode only a particular
 frame.
 
-flags meanings:
+chunk flags meanings:
 -flags & 1: this must be true for the delta frame immediately after the header,
  and false for all other frames. Indicates this is not a frame to be decoded,
  but the delta frame that all other frames can use as base for prediction.
 -flags & 2: this must be true for the footer (frame index), and must be false
  for all frames.
--flags & 4: iff true, delta frame prediction is enabled. This must be false if
- this frame is the delta frame.
--flags & 8: iff true, vertical prediction is enabled
--flags & 16: iff true, horizontal prediction is enabled
 
-procedure to decode a frame:
--given the xsize and ysize from the header, a frame has xsize columns and
- ysize rows.
+image flags meanings:
+-flags & 1: iff true, delta frame prediction is enabled. This must be false if
+ this frame is the delta frame.
+-flags & 2: iff true, clamped gradient prediction is enabled
+-flags & 4: iff true, the compressed low bytes brotli stream is not present, all
+ lower bytes are taken to be 0. Note: this can be used for the preview image.
+
+procedure to decode an image:
+-Note: given the xsize and ysize, a frame has xsize columns and ysize rows.
 -brotli decompress the low bytes. These correspond to the LSB's of the 16-bit
- image.
+ image. If this brotli stream is not present, set all xsize * ysize low bytes
+ to 0 instead.
 -brotli decompress the high bytes. These correspond to the MSB's of the 16-bit
  image.
 -Note: the brotli format is specified in RFC 7932
@@ -102,20 +129,23 @@ procedure to decode a frame:
  is invalid.
 -combine the low and high byte streams into a single xsize*ysize 16-bit frame of
  unsigned 16-bit integers.
--if horizontal prediction is enabled, then for all pixels except those of the
- leftmost column, compute: new_value = old_value + new_value_left, with
- new_value_left the new value of the pixel left of this one. The addition
- should wrap on overflow.
--if vertical prediction is enabled, then for all pixels except those of the
- topmost row, compute: new_value = old_value + new_value_up, similar to the
- horizontal prediction but with up refering to the pixel above the current
- pixel.
+-if clamped gradient prediction is enabled, then for all pixels except those of
+ the leftmost column and the topmost row, compute: new_value = old_value +
+ ClampedGradient(new_n, new_w, new_nw), with new_n, new_w and new_nw the already
+ computed new values (or existing value if it was from top or left row) of the
+ pixel respectively above, left, and above left of the current pixel. The
+ addition should wrap on overflow. ClampedGradient is defined mathematically
+ (where the intermediate operations happen in a space large enough to not
+ overflow) as: clamp((n + w - nw), min(n, w, nw), max(n, w, nw))
 -if delta prediction is enabled, then for all pixels compute:
- new_value = old_value + delta_frame_value - 32768, similar to the
- horizontal prediction but with delta_frame_value the value at the corresponding
- position from the delta frame.
+ new_value = old_value + delta_frame_value - 32768,  with delta_frame_value the
+ value at the corresponding position from the delta frame. The addition and
+ subtraction must wrap on overflow.
 -the resulting 16-bit image may represent 12-bit data (or another bit amount),
  in that case, the least significant bits will be set to 0.
+-Note: If this is a preview image, only 6 bits per sample are used and the other
+ 10 bits are zero. For displaying on an 8-bit display, repeat the two MSBs to
+ fill in the two LSBs of the 8-bit display sample.
 */
 
 namespace fpvc {
@@ -123,6 +153,9 @@ namespace {
 
 // Enable this to print line number and message on decoding errors.
 //#define FAIL_DEBUG_MESSAGE
+
+// Prevent out of memory
+#define MAX_IMAGE_SIZE 1000000000
 
 #ifdef FAIL_DEBUG_MESSAGE
 bool FailPrint(const char* file, int line, const std::string& message = "") {
@@ -145,7 +178,7 @@ bool BrotliCompress(const uint8_t* in, size_t size, std::vector<uint8_t>* out,
   std::unique_ptr<BrotliEncoderState, std::function<void(BrotliEncoderState*)>>
       enc(BrotliEncoderCreateInstance(nullptr, nullptr, nullptr),
           &BrotliEncoderDestroyInstance);
-  if (!enc) return FAILURE();
+  if (!enc) return FAILURE("couldn't init brotli encoder");
   BrotliEncoderSetParameter(enc.get(), BROTLI_PARAM_QUALITY, quality);
   BrotliEncoderSetParameter(enc.get(), BROTLI_PARAM_LGWIN, windowbits);
   BrotliEncoderSetParameter(enc.get(), BROTLI_PARAM_SIZE_HINT, size);
@@ -165,7 +198,7 @@ bool BrotliCompress(const uint8_t* in, size_t size, std::vector<uint8_t>* out,
     if (!BrotliEncoderCompressStream(enc.get(), BROTLI_OPERATION_FINISH,
                                      &avail_in, &next_in, &avail_out, &next_out,
                                      nullptr)) {
-      return FAILURE();
+      return FAILURE("brotli compression failed");
     }
   } while (!BrotliEncoderIsFinished(enc.get()));
   out_size -= avail_out;
@@ -181,7 +214,7 @@ bool BrotliDecompress(const uint8_t* in, size_t size, size_t* pos,
   std::unique_ptr<BrotliDecoderState, std::function<void(BrotliDecoderState*)>>
       decoder(BrotliDecoderCreateInstance(nullptr, nullptr, nullptr),
               &BrotliDecoderDestroyInstance);
-  if (!decoder) return FAILURE();
+  if (!decoder) return FAILURE("couldn't init brotli decoder");
 
   size_t avail_in = size - *pos;
   const uint8_t* next_in = in + *pos;
@@ -200,7 +233,9 @@ bool BrotliDecompress(const uint8_t* in, size_t size, size_t* pos,
     }
   }
   *pos = size - avail_in;
-  if (result != BROTLI_DECODER_RESULT_SUCCESS) return FAILURE();
+  if (result != BROTLI_DECODER_RESULT_SUCCESS) {
+    return FAILURE("brotli decompression failed");
+  }
   return true;
 }
 
@@ -260,21 +295,22 @@ void WriteUint64LE(uint64_t value, uint8_t* data) {
   data[7] = (value >> 56) & 255;
 }
 
-void CompressFrame(const uint16_t* delta_frame,
+// Returns whether pos + width > size, taking overflow into account.
+bool OutOfBounds(size_t pos, size_t width, size_t size) {
+  return (pos > size) || (size - pos < width);
+}
+
+void CompressImage(const uint16_t* delta_frame,
                    const uint16_t* img,
                    size_t xsize, size_t ysize,
+                   bool preview,
                    std::vector<uint8_t>* out) {
   int use_delta = 0;
-  int use_vertical = 0;
-  int use_horizontal = 0;
-  int use_pred = 0;
+  int use_clamped_gradient = 0;
+  int zero_low = preview ? 1 : 0;
   size_t numpixels = xsize * ysize;
   std::vector<uint16_t> img_copy(img, img + numpixels);
 
-#define ENABLE_PREDICTORS 1
-#define USE_CLAMPED_GRADIENT 0  // If not, uses hor or ver instead
-
-#if ENABLE_PREDICTORS
   if (delta_frame) {
     // heuristic to choose to use delta
     size_t skip = 15;  // let the heuristic run faster
@@ -294,7 +330,8 @@ void CompressFrame(const uint16_t* delta_frame,
     float ea = EstimateEntropy(counta0) + EstimateEntropy(counta1);
     float ed = EstimateEntropy(countd0) + EstimateEntropy(countd1);
 
-    use_delta = ed < ea;
+    if (ed < ea) use_delta = 1;
+
     if (use_delta) {
       for (size_t i = 0; i < numpixels; i++) {
         img_copy[i] = img_copy[i] - delta_frame[i] + 32768u;
@@ -302,8 +339,6 @@ void CompressFrame(const uint16_t* delta_frame,
     }
   }
 
-
-#if USE_CLAMPED_GRADIENT
   {
     std::vector<size_t> counta0(256);
     std::vector<size_t> counta1(256);
@@ -326,11 +361,10 @@ void CompressFrame(const uint16_t* delta_frame,
     float ea = EstimateEntropy(counta0) + EstimateEntropy(counta1);
     float eb = EstimateEntropy(countb0) + EstimateEntropy(countb1);
 
-    if (eb < ea) use_pred = 1;
+    if (eb < ea) use_clamped_gradient = 1;
 
-
-    if (use_pred) {
-      std::vector<uint16_t> temp(numpixels);
+    if (use_clamped_gradient) {
+      std::vector<uint16_t> temp = img_copy;
       for (size_t i = xsize + 1; i < img_copy.size(); i++) {
         uint16_t n = img_copy[i - xsize];
         uint16_t w = img_copy[i - 1];
@@ -340,58 +374,6 @@ void CompressFrame(const uint16_t* delta_frame,
       img_copy.swap(temp);
     }
   }
-#else  // USE_CLAMPED_GRADIENT
-  {
-    std::vector<size_t> counta0(256);
-    std::vector<size_t> counth0(256);
-    std::vector<size_t> countv0(256);
-    std::vector<size_t> counta1(256);
-    std::vector<size_t> counth1(256);
-    std::vector<size_t> countv1(256);
-
-    size_t skip = 15;  // let the heuristic run faster
-    for (size_t i = xsize; i < img_copy.size(); i += skip) {
-      uint16_t a = img_copy[i];
-      uint16_t h = img_copy[i - 1];
-      uint16_t v = img_copy[i - xsize];
-      h = (a - h);
-      v = (a - v);
-      counta0[(a)&255]++;
-      counth0[(h)&255]++;
-      countv0[(v)&255]++;
-      counta1[(a >> 8) & 255]++;
-      counth1[(h >> 8) & 255]++;
-      countv1[(v >> 8) & 255]++;
-    }
-
-    float ea = EstimateEntropy(counta0) + EstimateEntropy(counta1);
-    float eh = EstimateEntropy(counth0) + EstimateEntropy(counth1);
-    float ev = EstimateEntropy(countv0) + EstimateEntropy(countv1);
-
-    if (eh < ea && eh < ev) {
-      use_horizontal = 1;
-    } else if (ev < ea) {
-      use_vertical = 1;
-    }
-
-    if (use_vertical) {
-      std::vector<uint16_t> temp = img_copy;
-      for (size_t i = xsize; i < img_copy.size(); i++) {
-        temp[i] = img_copy[i] - img_copy[i - xsize];
-      }
-      temp.swap(img_copy);
-    }
-    if (use_horizontal) {
-      std::vector<uint16_t> temp = img_copy;
-      use_horizontal = 1;
-      for (size_t i = 1; i < img_copy.size(); i++) {
-        temp[i] = img_copy[i] - img_copy[i - 1];
-      }
-      temp.swap(img_copy);
-    }
-  }
-#endif  // USE_CLAMPED_GRADIENT
-#endif  // ENABLE_PREDICTORS
 
   std::vector<uint8_t> low;
   std::vector<uint8_t> lowc;
@@ -409,72 +391,59 @@ void CompressFrame(const uint16_t* delta_frame,
   // brotli quality 2, yet is faster. Only the entropy coding matters, not the
   // LZ77.
   int quality = 1;
-  BrotliCompress(low.data(), low.size(), &lowc, quality);
+  if (!zero_low) {
+    BrotliCompress(low.data(), low.size(), &lowc, quality);
+  }
   BrotliCompress(high.data(), high.size(), &highc, quality);
-
-  size_t result_size = 4 + 1 + highc.size() + lowc.size();
+  size_t result_size = 1 + highc.size() + lowc.size();
   out->resize(out->size() + result_size);
   uint8_t* out_data = out->data() + out->size() - result_size;
-  WriteUint32LE(result_size, out_data);
-  uint8_t flags = (use_delta << 2) + (use_vertical << 3) +
-                  (use_horizontal << 4) + (use_pred << 5);
-  out_data[4] = flags;
-  memcpy(out_data + 5, lowc.data(), lowc.size());
-  memcpy(out_data + 5 + lowc.size(), highc.data(), highc.size());
+  uint8_t flags = use_delta + (use_clamped_gradient << 1) + (zero_low << 2);
+  out_data[0] = flags;
+  if (!zero_low) memcpy(out_data + 1, lowc.data(), lowc.size());
+  memcpy(out_data + 1 + lowc.size(), highc.data(), highc.size());
 }
 
-bool DecompressFrame(const uint16_t* delta_frame,
+bool DecompressImage(const uint16_t* delta_frame,
                      const uint8_t* in, size_t size,
-                     size_t xsize, size_t ysize,
-                     size_t* pos, uint16_t* img) {
-  if (*pos + 5 > size) return FAILURE();
-  size_t expected_size = ReadUint32LE(in + *pos);
-  if (*pos + expected_size > size) return FAILURE();
+                     size_t xsize, size_t ysize, uint16_t* img) {
+  size_t pos = 0;
+  if (pos >= size) return FAILURE("out of bounds");
 
-  uint8_t flags = in[*pos + 4];
-  bool use_delta = flags & 4;
-  bool use_vertical = flags & 8;
-  bool use_horizontal = flags & 16;
-  bool use_pred = flags & 32;
-  *pos += 5;
-  // Error: invalid dimensions
-  if (!xsize || !ysize) return FAILURE();
+  uint8_t flags = in[pos];
+  bool use_delta = flags & 1;
+  bool use_clamped_gradient = flags & 2;
+  bool zero_low = flags & 4;
+  (pos)++;
+  if (!xsize || !ysize) return FAILURE("invalid image dimensions");
   size_t numpixels = xsize * ysize;
   // Error: want to use inter-frame delta but delta_frame frame not supplied.
-  if (use_delta && !delta_frame) return FAILURE();
+  if (use_delta && !delta_frame) return FAILURE("delta frame not given");
 
   std::vector<uint8_t> low;
-  if (!BrotliDecompress(in, size, pos, &low)) return FAILURE();
+  if (zero_low) {
+    low.resize(numpixels, 0);
+  } else {
+    if (!BrotliDecompress(in, size, &pos, &low)) return FAILURE();
+  }
 
   std::vector<uint8_t> high;
-  if (!BrotliDecompress(in, size, pos, &high)) return FAILURE();
+  if (!BrotliDecompress(in, size, &pos, &high)) return FAILURE();
 
   // Error: sizes don't match image size
-  if (low.size() != numpixels) return FAILURE();
-  if (low.size() != numpixels) return FAILURE();
+  if (low.size() != numpixels) return FAILURE("wrong decompressed plane size");
+  if (high.size() != numpixels) return FAILURE("wrong decompressed plane size");
 
   for (size_t i = 0; i < numpixels; i++) {
     img[i] = (high[i] << 8) | low[i];
   }
 
-  if (use_pred) {
+  if (use_clamped_gradient) {
     for (size_t i = xsize + 1; i < numpixels; i++) {
       uint16_t n = img[i - xsize];
       uint16_t w = img[i - 1];
       uint16_t nw = img[i - xsize - 1];
       img[i] = img[i] + ClampedGradient(n, w, nw);
-    }
-  }
-
-  if (use_horizontal) {
-    for (size_t i = 1; i < numpixels; i++) {
-      img[i] = img[i] + img[i - 1];
-    }
-  }
-
-  if (use_vertical) {
-    for (size_t i = xsize; i < numpixels; i++) {
-      img[i] = img[i] + img[i - xsize];
     }
   }
 
@@ -488,6 +457,48 @@ bool DecompressFrame(const uint16_t* delta_frame,
 }
 
 }  // namespace
+
+////////////////////////////////////////////////////////////////////////////////
+
+
+void CompressFrameWithPreview(const uint16_t* delta_frame,
+                              const uint16_t* img,
+                              size_t xsize, size_t ysize,
+                              std::vector<uint8_t>* out) {
+  // Downsample the preview frame to 1/8th width and height.
+  static const int F = 8;  // downscale factor
+  size_t xsize2 = (xsize + F - 1) / F;
+  size_t ysize2 = (ysize + F - 1) / F;
+  std::vector<uint16_t> preview(xsize2 * ysize2);
+  for (size_t y = 0; y < ysize2; ++y) {
+    for (size_t x = 0; x < xsize2; ++x) {
+      uint32_t sum = 0;
+      size_t x0 = x * F, y0 = y * F;
+      size_t x1 = x0 + F, y1 = y0 + F;
+      if (x1 > xsize) x1 = xsize;
+      if (y1 > ysize) y1 = ysize;
+      for (size_t y2 = y0; y2 < y1; ++y2) {
+        for (size_t x2 = x0; x2 < x1; ++x2) {
+          sum += img[y2 * xsize + x2];
+        }
+      }
+      sum /= ((x1 - x0) * (y1 - y0));
+      // Mask to take only the 6 MSBs
+      preview[y * xsize2 + x] = sum & 0xfc00;
+    }
+  }
+
+  size_t begin = out->size();
+  out->resize(out->size() + 9);
+  CompressImage(nullptr, preview.data(), xsize2, ysize2, false, out);
+  size_t preview_size = out->size() - begin - 9;
+  CompressImage(delta_frame, img, xsize, ysize, false, out);
+  size_t total_size = out->size() - begin;
+  WriteUint32LE(total_size, out->data() + begin);
+  // Flag indicating this is not a delta frame or frame list.
+  (*out)[begin + 4] = 0;
+  WriteUint32LE(preview_size, out->data() + begin + 5);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -528,23 +539,38 @@ void StreamingDecoder::Decode(const uint8_t* bytes, size_t size,
     buffer.insert(buffer.end(), bytes, bytes + size);
   }
 
+  #define FAIL_CALLBACK(message) {\
+    callback(FAILURE(message), nullptr, 0, 0, payload);\
+    return;\
+  }
+
   const uint8_t* in = buffer.empty() ? bytes : buffer.data();
   size_t insize = buffer.empty() ? size : buffer.size();
 
   bool has_header = !delta_frame.empty();
   size_t pos = 0;
-  if (delta_frame.empty() && insize > 12) {
+  if (delta_frame.empty() && insize > 13) {
     xsize = ReadUint32LE(in + 0);
     ysize = ReadUint32LE(in + 4);
     pos += 8;
 
+    if (xsize == 0 || ysize == 0) FAIL_CALLBACK("invalid image dimensions");
+    if (xsize > 65536 || ysize > 65536 || xsize * ysize > MAX_IMAGE_SIZE) {
+      // In theory larger sizes are possible, but this prevents OOM
+      FAIL_CALLBACK("image too large");
+    }
+
     size_t deltasize = ReadUint32LE(in + pos);
+    if (deltasize < 5) FAIL_CALLBACK("too small for delta frame");
+    uint8_t flag = in[pos + 4];
+    if (flag != 1) FAIL_CALLBACK("not a delta frame");
     if (deltasize + pos <= insize) {
       delta_frame.resize(xsize * ysize);
-      if (!DecompressFrame({}, in, insize, xsize, ysize, &pos,
+      if (!DecompressImage({}, in + pos + 5, deltasize - 5, xsize, ysize,
           delta_frame.data())) {
-        callback(FAILURE(), nullptr, 0, 0, payload);
+        FAIL_CALLBACK("decompressing delta frame failed");
       }
+      pos += deltasize;
       has_header = true;
     } else {
       pos = 0;
@@ -553,21 +579,23 @@ void StreamingDecoder::Decode(const uint8_t* bytes, size_t size,
 
   for (;;) {
     if (!has_header) break;
-    if (pos + 5 > insize) break;
+    if (pos + 9 > insize) break;
 
-    size_t framesize = ReadUint32LE(in + pos);
-    if (pos + framesize > insize) break;
-    if (in[pos + 4] & 2) break;  // Frame index reached, end of frames.
+    size_t frame_size = ReadUint32LE(in + pos);
+    uint8_t flag = in[pos + 4];
+    if (flag == 2) break;  // Frame index reached, end of frames.
+    if (flag != 0) FAIL_CALLBACK("not a standard frame");
+    if (pos + frame_size > insize) break;
+    size_t preview_size = ReadUint32LE(in + pos + 5);
+    if (preview_size > frame_size) FAIL_CALLBACK("preview size too large");
 
-
+    size_t main_size = frame_size - preview_size - 9;
     std::vector<uint16_t> frame(xsize * ysize);
-    bool ok = DecompressFrame(delta_frame.data(), in, insize,
-        xsize, ysize, &pos, frame.data());
+    bool ok = DecompressImage(delta_frame.data(), in + pos + 9 + preview_size, main_size,
+        xsize, ysize, frame.data());
+    pos += frame_size;
 
-    if (!ok) {
-      callback(FAILURE(), nullptr, 0, 0, payload);
-      return;
-    }
+    if (!ok) FAIL_CALLBACK("decompressing frame failed");
 
     callback(ok, frame.data(), xsize, ysize, payload);
     id++;
@@ -589,40 +617,60 @@ void StreamingDecoder::Decode(const uint8_t* bytes, size_t size,
       }
     }
   }
+
+  #undef FAIL_CALLBACK
 }
 
 
 ////////////////////////////////////////////////////////////////////////////////
 
 bool RandomAccessDecoder::Init(const uint8_t* data, size_t size) {
-  if (size < 25) return FAILURE();  // Cannot contain header and footer.
+  // Header and delta frame size
+  if (size < 12) return FAILURE("data too small to contain header");
 
   data_ = data;
   size_ = size;
 
   xsize_ = ReadUint32LE(data + 0);
   ysize_ = ReadUint32LE(data + 4);
-  if (xsize_ == 0 || ysize_ == 0) return FAILURE();
+  if (xsize_ == 0 || ysize_ == 0) return FAILURE("invalid image dimensions");
+  if (xsize_ > 65536 || ysize_ > 65536 || xsize_ * ysize_ > MAX_IMAGE_SIZE) {
+    // In theory larger sizes are possible, but this prevents OOM
+    return FAILURE("image too large");
+  }
 
   // Parse the delta frame
-  size_t delta_frame_size = ReadUint32LE(data + 8);
   size_t pos = 8;
+  size_t delta_frame_size = ReadUint32LE(data + pos);
+  if (OutOfBounds(pos, delta_frame_size, size)) return FAILURE("out of bounds");
+  if (delta_frame_size < 5) return FAILURE("delta frame too small");
+  uint8_t flag = data[12];
+  if (flag != 1) return FAILURE("must begin with delta frame");
   delta_frame.resize(xsize_ * ysize_);
-  if (!fpvc::DecompressFrame({}, data, size, xsize_, ysize_, &pos,
-      delta_frame.data())) {
-    return FAILURE();
+  if (!fpvc::DecompressImage({}, data + pos + 5, delta_frame_size - 5,
+      xsize_, ysize_, delta_frame.data())) {
+    return FAILURE("failed to decode delta frame");
   }
-  if (delta_frame.size() != xsize_ * ysize_) return FAILURE();
+  pos += delta_frame_size;
+  if (delta_frame.size() != xsize_ * ysize_) {
+    return FAILURE("delta frame dimensions don't match");
+  }
 
   // Parse the frame index
   size_t num_frames = ReadUint64LE(data + size - 8);
+  // Prevent num_frames overflow, the entire file needs at least 16 bytes per
+  // frame for its frame index listing and the frame's own header.
+  if (num_frames > size / 16) return FAILURE("too many frames");
   size_t footer_size = 5 + 8 * num_frames + 8;
-  if (8 + delta_frame_size + footer_size > size) return FAILURE();
+  if (footer_size > size) return FAILURE("footer too large");
   frame_offsets.resize(num_frames);
   pos = size - footer_size;
   size_t verify_footer_size = ReadUint32LE(data + pos);
-  if (verify_footer_size != footer_size) return FAILURE();
-  if (data[pos + 4] != 2) return FAILURE();
+  if (verify_footer_size != footer_size) {
+    return FAILURE("footer size mismatch");
+  }
+  // Flag must be 2 to indicate frame index.
+  if (data[pos + 4] != 2) return FAILURE("must end with frame index");
   pos += 5;
   for (size_t i = 0; i < num_frames; i++) {
     frame_offsets[i] = ReadUint64LE(data + pos);
@@ -633,13 +681,61 @@ bool RandomAccessDecoder::Init(const uint8_t* data, size_t size) {
 }
 
 bool RandomAccessDecoder::DecodeFrame(size_t index, uint16_t* frame) const {
-  if (index >= frame_offsets.size()) return FAILURE();
+  if (index >= frame_offsets.size()) return FAILURE("invalid frame index");
   size_t offset = frame_offsets[index];
-  if (offset > size_) return FAILURE();
-  size_t frame_size = ReadUint32LE(data_ + offset);
-  if (offset + frame_size > size_) return FAILURE();
-  return fpvc::DecompressFrame(delta_frame.data(),
-      data_, size_, xsize_, ysize_, &offset, frame);
+  if (OutOfBounds(offset, 9, size_)) return FAILURE("out of bounds");
+  const uint8_t* data = data_ + offset;
+
+  size_t frame_size = ReadUint32LE(data);
+  if (frame_size < 9) return FAILURE("frame too small");
+  if (OutOfBounds(offset, frame_size, size_)) return FAILURE("out of bounds");
+  uint8_t flag = data[4];
+  if (flag != 0) return FAILURE("not a standard frame");
+  size_t preview_size = ReadUint32LE(data + 5);
+  if (preview_size > frame_size - 9) return FAILURE("preview too large");
+  size_t main_size = frame_size - preview_size - 9;
+  if (!fpvc::DecompressImage(delta_frame.data(),
+      data + 9 + preview_size, main_size, xsize_, ysize_, frame)) {
+    return FAILURE();
+  }
+  return true;
+}
+
+bool RandomAccessDecoder::DecodePreview(size_t index, uint8_t* preview) const {
+  if (index >= frame_offsets.size()) return FAILURE("invalid preview index");
+
+  size_t offset = frame_offsets[index];
+  if (OutOfBounds(offset, 9, size_)) return FAILURE();
+  const uint8_t* data = data_ + offset;
+
+  size_t frame_size = ReadUint32LE(data);
+  if (frame_size < 9) return FAILURE("frame too small");
+  if (OutOfBounds(offset, frame_size, size_)) return FAILURE("out of bounds");
+  uint8_t flag = data[4];
+  if (flag != 0) return FAILURE("not a standard frame");
+  size_t preview_size = ReadUint32LE(data + 5);
+  if (OutOfBounds(9, preview_size, frame_size)) {
+    return FAILURE("preview too large");
+  }
+
+  size_t xsize = preview_xsize();
+  size_t ysize = preview_ysize();
+  std::vector<uint16_t> preview16(xsize * ysize);
+  if (!fpvc::DecompressImage(delta_frame.data(),
+      data + 9, preview_size, xsize, ysize, preview16.data())) {
+    return FAILURE("failed to decompress preview");
+  }
+
+  for (size_t y = 0; y < ysize; y++) {
+    for (size_t x = 0; x < xsize; x++) {
+      preview[y * xsize + x] = preview16[y * xsize + x] >> 8;
+      // Since the preview is stored as 6-bit, repeat the MSBs in LSBs to
+      // use all 8 bits.
+      preview[y * xsize + x] |= (preview[y * xsize + x] >> 6);
+    }
+  }
+
+  return true;
 }
 
 
@@ -661,10 +757,12 @@ void Encoder::Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
   xsize_ = xsize;
   ysize_ = ysize;
   std::vector<uint8_t> compressed;
-  compressed.resize(8);
+  compressed.resize(13);
   WriteUint32LE(xsize, compressed.data() + 0);
   WriteUint32LE(ysize, compressed.data() + 4);
-  fpvc::CompressFrame(nullptr, delta_frame, xsize, ysize, &compressed);
+  fpvc::CompressImage(nullptr, delta_frame, xsize, ysize, false, &compressed);
+  WriteUint32LE(compressed.size() - 8, compressed.data() + 8);
+  compressed[12] = 1;  // Flag indicating delta frame.
   bytes_written = compressed.size();
   callback(compressed.data(), compressed.size(), payload);
 }
@@ -722,7 +820,7 @@ void Encoder::CompressFrame(const uint16_t* img,
 
 std::vector<uint8_t> Encoder::RunTask(const Task& task) {
   std::vector<uint8_t> compressed;
-  fpvc::CompressFrame(delta_frame_.data(), task.frame,
+  fpvc::CompressFrameWithPreview(delta_frame_.data(), task.frame,
       xsize_, ysize_, &compressed);
   return compressed;
 }
@@ -746,7 +844,7 @@ void Encoder::WriteFrameIndex(std::vector<uint8_t>* compressed) const {
   size_t frameindex_size = 5 + 8 * frame_offsets.size() + 8;
   compressed->resize(compressed->size() + frameindex_size);
   WriteUint32LE(frameindex_size, &(*compressed)[pos]);
-  (*compressed)[pos + 4] = 2;  // flags indicating it's the frame index
+  (*compressed)[pos + 4] = 2;  // flag indicating it's the frame index
   pos += 5;
   for (size_t i = 0; i < frame_offsets.size(); i++) {
     WriteUint64LE(frame_offsets[i], &(*compressed)[pos]);

@@ -42,7 +42,7 @@ int main(int argc, char* argv[]) {
   size_t ysize = ParseInt(argv[2]);
   size_t big_endian = ParseInt(argv[3]);
   size_t shift = ParseInt(argv[4]);
-  size_t num_threads = 4;
+  size_t num_threads = 8;
   if (argc > 5) {
     num_threads = ParseInt(argv[5]);
   }
