@@ -106,10 +106,10 @@ chunk flags meanings:
  for all frames.
 
 image flags meanings:
--flags & 1: iff true, delta frame prediction is enabled. This must be false if
+-flags & 1: if true, delta frame prediction is enabled. This must be false if
  this frame is the delta frame.
--flags & 2: iff true, clamped gradient prediction is enabled
--flags & 4: iff true, the compressed low bytes brotli stream is not present, all
+-flags & 2: if true, clamped gradient prediction is enabled
+-flags & 4: if true, the compressed low bytes brotli stream is not present, all
  lower bytes are taken to be 0. Note: this can be used for the preview image.
 
 procedure to decode an image:
@@ -127,16 +127,19 @@ procedure to decode an image:
  file is invalid.
 -Note: each brotli-decoded byte stream has xsize * ysize bytes, if not the file
  is invalid.
--combine the low and high byte streams into a single xsize*ysize 16-bit frame of
- unsigned 16-bit integers.
 -if clamped gradient prediction is enabled, then for all pixels except those of
- the leftmost column and the topmost row, compute: new_value = old_value +
- ClampedGradient(new_n, new_w, new_nw), with new_n, new_w and new_nw the already
- computed new values (or existing value if it was from top or left row) of the
- pixel respectively above, left, and above left of the current pixel. The
+ the leftmost column and the topmost row, compute: new_high_byte = old_high_byte
+ + ClampedGradient(new_n, new_w, new_nw), with new_n, new_w and new_nw the 
+ already computed new values (or existing value if it was from top or left row) 
+ of the pixel respectively above, left, and above left of the current pixel. The
  addition should wrap on overflow. ClampedGradient is defined mathematically
  (where the intermediate operations happen in a space large enough to not
- overflow) as: clamp((n + w - nw), min(n, w, nw), max(n, w, nw))
+ overflow) as: clamp((n + w - nw), min(n, w, nw), max(n, w, nw)). The low bytes
+ are not predicted as they 1. most often contain just noise and 2. because of 
+ their nature as lower half of a 16bit value, the ClampedGradient is no valid 
+ predictor for them
+-combine the low and high byte streams into a single xsize*ysize 16-bit frame of
+ unsigned 16-bit integers.
 -if delta prediction is enabled, then for all pixels compute:
  new_value = old_value + delta_frame_value - 32768,  with delta_frame_value the
  value at the corresponding position from the delta frame. The addition and
@@ -258,10 +261,10 @@ float EstimateEntropy(const std::vector<size_t>& v) {
 }
 
 // clamped gradient predictor
-uint16_t ClampedGradient(uint16_t n, uint16_t w, uint16_t nw) {
-  const uint16_t i = std::min(n, w), a = std::max(n, w);
-  const uint16_t gradient = n + w - nw;
-  const uint16_t clamped = (nw < i) ? a : gradient;
+uint8_t ClampedGradient(uint8_t n, uint8_t w, uint8_t nw) {
+  const uint8_t i = std::min(n, w), a = std::max(n, w);
+  const uint8_t gradient = n + w - nw;
+  const uint8_t clamped = (nw < i) ? a : gradient;
   return (nw > a) ? i : clamped;
 }
 
@@ -309,7 +312,8 @@ void CompressImage(const uint16_t* delta_frame,
   int use_clamped_gradient = 0;
   int zero_low = preview ? 1 : 0;
   size_t numpixels = xsize * ysize;
-  std::vector<uint16_t> img_copy(img, img + numpixels);
+  std::vector<uint8_t> high;
+  std::vector<uint8_t> low;
 
   if (delta_frame) {
     // heuristic to choose to use delta
@@ -320,7 +324,7 @@ void CompressImage(const uint16_t* delta_frame,
     std::vector<size_t> countd1(256);
 
     for (size_t i = 0; i < numpixels; i += skip) {
-      uint16_t a = img_copy[i];
+      uint16_t a = img[i];
       uint16_t d = a - delta_frame[i];
       counta0[a & 255]++;
       counta1[a >> 8]++;
@@ -333,59 +337,58 @@ void CompressImage(const uint16_t* delta_frame,
     if (ed < ea) use_delta = 1;
 
     if (use_delta) {
+      high.reserve(numpixels);
+      low.reserve(numpixels);
       for (size_t i = 0; i < numpixels; i++) {
-        img_copy[i] = img_copy[i] - delta_frame[i] + 32768u;
+        uint16_t pixel = img[i] - delta_frame[i] + 32768u;
+        high.push_back((pixel >> 8) & 0xff);
+        low.push_back(pixel & 0xff);
       }
+    }
+  }
+
+  if (!use_delta) {
+    high.reserve(numpixels);
+    low.reserve(numpixels);
+    for (size_t i = 0; i < numpixels; i++) {
+      uint16_t pixel = img[i];
+      high.push_back((pixel >> 8) & 0xff);
+      low.push_back(pixel & 0xff);
     }
   }
 
   {
-    std::vector<size_t> counta0(256);
-    std::vector<size_t> counta1(256);
-    std::vector<size_t> countb0(256);
-    std::vector<size_t> countb1(256);
+    std::vector<size_t> counta(256);
+    std::vector<size_t> countb(256);
 
     size_t skip = 31;  // let the heuristic run faster
     for (size_t i = xsize + 1; i < numpixels; i += skip) {
-      uint16_t a = img_copy[i];
-      uint16_t n = img_copy[i - xsize];
-      uint16_t w = img_copy[i - 1];
-      uint16_t nw = img_copy[i - xsize - 1];
-      uint16_t b = a - ClampedGradient(n, w, nw);
-      counta0[a & 255]++;
-      counta1[(a >> 8) & 255]++;
-      countb0[b & 255]++;
-      countb1[(b >> 8) & 255]++;
+      uint8_t a = high[i];
+      uint8_t n = high[i - xsize];
+      uint8_t w = high[i - 1];
+      uint8_t nw = high[i - xsize - 1];
+      uint8_t b = a - ClampedGradient(n, w, nw);
+      counta[a]++;
+      countb[b]++;
     }
 
-    float ea = EstimateEntropy(counta0) + EstimateEntropy(counta1);
-    float eb = EstimateEntropy(countb0) + EstimateEntropy(countb1);
-
-    if (eb < ea) use_clamped_gradient = 1;
+    if (EstimateEntropy(countb) < EstimateEntropy(counta))
+      use_clamped_gradient = 1;
 
     if (use_clamped_gradient) {
-      std::vector<uint16_t> temp = img_copy;
-      for (size_t i = xsize + 1; i < img_copy.size(); i++) {
-        uint16_t n = img_copy[i - xsize];
-        uint16_t w = img_copy[i - 1];
-        uint16_t nw = img_copy[i - xsize - 1];
-        temp[i] = img_copy[i] - ClampedGradient(n, w, nw);
+      std::vector<uint8_t> temp = high;
+      for (size_t i = xsize + 1; i < numpixels; i++) {
+          uint8_t n = high[i - xsize];
+          uint8_t w = high[i - 1];
+          uint8_t nw = high[i - xsize - 1];
+          temp[i] = high[i] - ClampedGradient(n, w, nw);
       }
-      img_copy.swap(temp);
+      high.swap(temp);
     }
   }
 
-  std::vector<uint8_t> low;
   std::vector<uint8_t> lowc;
-  std::vector<uint8_t> high;
   std::vector<uint8_t> highc;
-
-  low.resize(img_copy.size());
-  high.resize(img_copy.size());
-  for (size_t i = 0; i < img_copy.size(); i++) {
-    low[i] = img_copy[i] & 255;
-    high[i] = (img_copy[i] >> 8u) & 255;
-  }
 
   // NOTE: for this use case, brotli quality 1 gives smaller result than
   // brotli quality 2, yet is faster. Only the entropy coding matters, not the
@@ -434,17 +437,17 @@ bool DecompressImage(const uint16_t* delta_frame,
   if (low.size() != numpixels) return FAILURE("wrong decompressed plane size");
   if (high.size() != numpixels) return FAILURE("wrong decompressed plane size");
 
-  for (size_t i = 0; i < numpixels; i++) {
-    img[i] = (high[i] << 8) | low[i];
-  }
-
   if (use_clamped_gradient) {
     for (size_t i = xsize + 1; i < numpixels; i++) {
-      uint16_t n = img[i - xsize];
-      uint16_t w = img[i - 1];
-      uint16_t nw = img[i - xsize - 1];
-      img[i] = img[i] + ClampedGradient(n, w, nw);
+      uint8_t n = high[i - xsize];
+      uint8_t w = high[i - 1];
+      uint8_t nw = high[i - xsize - 1];
+      high[i] = high[i] + ClampedGradient(n, w, nw);
     }
+  }
+
+  for (size_t i = 0; i < numpixels; i++) {
+    img[i] = (high[i] << 8) | low[i];
   }
 
   if (use_delta) {
