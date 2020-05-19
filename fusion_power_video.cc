@@ -128,22 +128,23 @@ procedure to decode an image:
 -Note: each brotli-decoded byte stream has xsize * ysize bytes, if not the file
  is invalid.
 -if clamped gradient prediction is enabled, then for all pixels except those of
- the leftmost column and the topmost row, compute: new_high_byte = old_high_byte
- + ClampedGradient(new_n, new_w, new_nw), with new_n, new_w and new_nw the 
- already computed new values (or existing value if it was from top or left row) 
- of the pixel respectively above, left, and above left of the current pixel. The
- addition should wrap on overflow. ClampedGradient is defined mathematically
- (where the intermediate operations happen in a space large enough to not
- overflow) as: clamp((n + w - nw), min(n, w, nw), max(n, w, nw)). The low bytes
- are not predicted as they 1. most often contain just noise and 2. because of 
- their nature as lower half of a 16bit value, the ClampedGradient is no valid 
- predictor for them
+ the topmost row and the first column of the second row, compute: new_high_byte
+ = old_high_byte + ClampedGradient(new_n, new_w, new_nw), with new_n, new_w and
+ new_nw the already computed new values (or existing value if it was from top 
+ row or first pixel of the second row) of the pixel respectively above, left,
+ and above left of the current pixel. The addition should wrap on overflow. 
+ ClampedGradient is defined mathematically (where the intermediate operations 
+ happen in a space large enough to not overflow) as: clamp((n + w - nw), min(n,
+ w, nw), max(n, w, nw)). The low bytes are not predicted as they 1. most often
+ contain just noise and 2. because of their nature as lower half of a 16bit 
+ value, the ClampedGradient is no valid predictor for them
+-if delta prediction is enabled, then for all pixels compute:
+ new_high_byte = old_high_byte + delta_frame_high_byte, and the same for the
+ low byte plane (with delta_frame_value_high_byte the high byte value at the
+ corresponding position from the delta frame). The addition and subtraction
+ must wrap on overflow.
 -combine the low and high byte streams into a single xsize*ysize 16-bit frame of
  unsigned 16-bit integers.
--if delta prediction is enabled, then for all pixels compute:
- new_value = old_value + delta_frame_value - 32768,  with delta_frame_value the
- value at the corresponding position from the delta frame. The addition and
- subtraction must wrap on overflow.
 -the resulting 16-bit image may represent 12-bit data (or another bit amount),
  in that case, the least significant bits will be set to 0.
 -Note: If this is a preview image, only 6 bits per sample are used and the other
@@ -318,31 +319,24 @@ void CompressImage(const uint16_t* delta_frame,
   if (delta_frame) {
     // heuristic to choose to use delta
     size_t skip = 15;  // let the heuristic run faster
-    std::vector<size_t> counta0(256);
-    std::vector<size_t> counta1(256);
-    std::vector<size_t> countd0(256);
-    std::vector<size_t> countd1(256);
+    std::vector<size_t> counta(256);
+    std::vector<size_t> countd(256);
 
     for (size_t i = 0; i < numpixels; i += skip) {
-      uint16_t a = img[i];
-      uint16_t d = a - delta_frame[i];
-      counta0[a & 255]++;
-      counta1[a >> 8]++;
-      countd0[d & 255]++;
-      countd1[d >> 8]++;
+      uint8_t a = img[i] >> 8;
+      uint8_t d = a - (delta_frame[i] >> 8);
+      counta[a]++;
+      countd[d]++;
     }
-    float ea = EstimateEntropy(counta0) + EstimateEntropy(counta1);
-    float ed = EstimateEntropy(countd0) + EstimateEntropy(countd1);
 
-    if (ed < ea) use_delta = 1;
+    if (EstimateEntropy(countd) < EstimateEntropy(counta)) use_delta = 1;
 
     if (use_delta) {
       high.reserve(numpixels);
       low.reserve(numpixels);
       for (size_t i = 0; i < numpixels; i++) {
-        uint16_t pixel = img[i] - delta_frame[i] + 32768u;
-        high.push_back((pixel >> 8) & 0xff);
-        low.push_back(pixel & 0xff);
+        high.push_back(((img[i] >> 8) - (delta_frame[i] >> 8)) & 0xff);
+        low.push_back(((img[i] &0xff) - (delta_frame[i] & 0xff)) & 0xff);
       }
     }
   }
@@ -446,13 +440,14 @@ bool DecompressImage(const uint16_t* delta_frame,
     }
   }
 
-  for (size_t i = 0; i < numpixels; i++) {
-    img[i] = (high[i] << 8) | low[i];
-  }
-
   if (use_delta) {
     for (size_t i = 0; i < numpixels; i++) {
-      img[i] = img[i] + delta_frame[i] - 32768u;
+      img[i] = ((high[i] + (delta_frame[i] >> 8)) << 8) 
+            | ((low[i] + (delta_frame[i] & 0xff)) & 0xff);
+    }
+  } else {
+    for (size_t i = 0; i < numpixels; i++) {
+      img[i] = (high[i] << 8) | low[i];
     }
   }
 
