@@ -17,6 +17,8 @@
 #include <math.h>
 #include <string.h>  // memcpy
 
+#include <numeric>
+
 #include <functional>
 #include <iostream>
 #include <thread>
@@ -243,22 +245,17 @@ bool BrotliDecompress(const uint8_t* in, size_t size, size_t* pos,
   return true;
 }
 
-// Returns average entropy per symbol (a guess of bits per pixel).
+template<typename T> T approxLog2(T v) {
+   return ((unsigned) (8*sizeof(T) - __builtin_clzll((v)) - 1));
+}
+// Returns somthing akin to the average entropy per symbol (a guess of bits per pixel).
 float EstimateEntropy(const std::vector<size_t>& v) {
-  float result = 0;
-  float sum = 0;
-  for (size_t i = 0; i < v.size(); i++) {
-    sum += v[i];
-  }
-  if (!sum) return 0;
-  float s = 1.0 / sum;
-  for (size_t i = 0; i < v.size(); i++) {
-    if (!v[i]) continue;
-    float p = v[i] * s;
-    // TODO: use a fast log2 approximation
-    result -= log2(p) * p;
-  }
-  return result;
+  size_t sum = std::accumulate(v.begin(), v.end(), 0);
+  size_t log2sum = approxLog2(sum);
+  size_t sumOfLogs = std::accumulate(v.begin(), v.end(), 0, 
+        [log2sum] (size_t acc, size_t v) { return acc -  v * (approxLog2(v) - log2sum); });
+
+  return 1024 * sumOfLogs / sum;
 }
 
 // clamped gradient predictor
