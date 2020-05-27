@@ -71,7 +71,7 @@ frame format:
  bytes
 -preview_size bytes: preview image in the image format, see image format below.
  This preview image is encoded without any delta frame, and its xsize and ysize
- are 1/8th of the respective main xsize and ysize, rounded up. The preview
+ are 1/8th of the respective main xsize and ysize, rounded down. The preview
  image should only use the 6 most significant bits of each 16-bit sample and
  leave all other 10 bits at zero.
 -remaining bytes: the full frame encoded in the image format, see image format
@@ -158,10 +158,15 @@ namespace fpvc {
 namespace {
 
 // Enable this to print line number and message on decoding errors.
-//#define FAIL_DEBUG_MESSAGE
+#define FAIL_DEBUG_MESSAGE
 
 // Prevent out of memory
 #define MAX_IMAGE_SIZE 1000000000
+
+// NOTE: for this use case, brotli quality 1 gives smaller result than
+// brotli quality 2, yet is faster. Only the entropy coding matters, not the
+// LZ77.
+#define FPV_BROTLI_QUALITY 1
 
 #ifdef FAIL_DEBUG_MESSAGE
 bool FailPrint(const char* file, int line, const std::string& message = "") {
@@ -254,8 +259,8 @@ float EstimateEntropy(const std::vector<size_t>& v) {
   size_t log2sum = approxLog2(sum);
   size_t sumOfLogs = std::accumulate(v.begin(), v.end(), 0, 
         [log2sum] (size_t acc, size_t v) { return acc -  v * (approxLog2(v) - log2sum); });
-
-  return 1024 * sumOfLogs / sum;
+  if (sum == 0) return 0;
+  else return 1024 * sumOfLogs / sum;
 }
 
 // clamped gradient predictor
@@ -276,6 +281,14 @@ void WriteUint32LE(uint32_t value, uint8_t* data) {
   data[1] = (value >> 8) & 255;
   data[2] = (value >> 16) & 255;
   data[3] = (value >> 24) & 255;
+}
+
+void PushBackUint32LE(uint32_t value, std::vector<uint8_t> *out) {
+  out->reserve(out->size() + 4);
+  out->push_back(value & 0xff);
+  out->push_back((value >> 8) & 0xff);
+  out->push_back((value >> 16) & 0xff);
+  out->push_back((value >> 24) & 0xff);
 }
 
 uint64_t ReadUint64LE(const uint8_t* data) {
@@ -304,98 +317,20 @@ bool OutOfBounds(size_t pos, size_t width, size_t size) {
 void CompressImage(const uint16_t* delta_frame,
                    const uint16_t* img,
                    size_t xsize, size_t ysize,
-                   bool preview,
+                   bool fullFrame,
                    std::vector<uint8_t>* out) {
-  int use_delta = 0;
-  int use_clamped_gradient = 0;
-  int zero_low = preview ? 1 : 0;
-  size_t numpixels = xsize * ysize;
-  std::vector<uint8_t> high;
-  std::vector<uint8_t> low;
 
-  if (delta_frame) {
-    // heuristic to choose to use delta
-    size_t skip = 15;  // let the heuristic run faster
-    std::vector<size_t> counta(256);
-    std::vector<size_t> countd(256);
-
-    for (size_t i = 0; i < numpixels; i += skip) {
-      uint8_t a = img[i] >> 8;
-      uint8_t d = a - (delta_frame[i] >> 8);
-      counta[a]++;
-      countd[d]++;
-    }
-
-    if (EstimateEntropy(countd) < EstimateEntropy(counta)) use_delta = 1;
-
-    if (use_delta) {
-      high.reserve(numpixels);
-      low.reserve(numpixels);
-      for (size_t i = 0; i < numpixels; i++) {
-        high.push_back(((img[i] >> 8) - (delta_frame[i] >> 8)) & 0xff);
-        low.push_back(((img[i] &0xff) - (delta_frame[i] & 0xff)) & 0xff);
-      }
-    }
+  Frame delta = Frame(delta_frame, xsize, ysize);
+  
+  Frame frame = Frame(img, xsize, ysize);
+  
+  frame.Compress(delta);
+  
+  if (fullFrame) {
+    frame.OutputFull(out);
+  } else {
+    frame.OutputCore(out);
   }
-
-  if (!use_delta) {
-    high.reserve(numpixels);
-    low.reserve(numpixels);
-    for (size_t i = 0; i < numpixels; i++) {
-      uint16_t pixel = img[i];
-      high.push_back((pixel >> 8) & 0xff);
-      low.push_back(pixel & 0xff);
-    }
-  }
-
-  {
-    std::vector<size_t> counta(256);
-    std::vector<size_t> countb(256);
-
-    size_t skip = 31;  // let the heuristic run faster
-    for (size_t i = xsize + 1; i < numpixels; i += skip) {
-      uint8_t a = high[i];
-      uint8_t n = high[i - xsize];
-      uint8_t w = high[i - 1];
-      uint8_t nw = high[i - xsize - 1];
-      uint8_t b = a - ClampedGradient(n, w, nw);
-      counta[a]++;
-      countb[b]++;
-    }
-
-    if (EstimateEntropy(countb) < EstimateEntropy(counta))
-      use_clamped_gradient = 1;
-
-    if (use_clamped_gradient) {
-      std::vector<uint8_t> temp = high;
-      for (size_t i = xsize + 1; i < numpixels; i++) {
-          uint8_t n = high[i - xsize];
-          uint8_t w = high[i - 1];
-          uint8_t nw = high[i - xsize - 1];
-          temp[i] = high[i] - ClampedGradient(n, w, nw);
-      }
-      high.swap(temp);
-    }
-  }
-
-  std::vector<uint8_t> lowc;
-  std::vector<uint8_t> highc;
-
-  // NOTE: for this use case, brotli quality 1 gives smaller result than
-  // brotli quality 2, yet is faster. Only the entropy coding matters, not the
-  // LZ77.
-  int quality = 1;
-  if (!zero_low) {
-    BrotliCompress(low.data(), low.size(), &lowc, quality);
-  }
-  BrotliCompress(high.data(), high.size(), &highc, quality);
-  size_t result_size = 1 + highc.size() + lowc.size();
-  out->resize(out->size() + result_size);
-  uint8_t* out_data = out->data() + out->size() - result_size;
-  uint8_t flags = use_delta + (use_clamped_gradient << 1) + (zero_low << 2);
-  out_data[0] = flags;
-  if (!zero_low) memcpy(out_data + 1, lowc.data(), lowc.size());
-  memcpy(out_data + 1 + lowc.size(), highc.data(), highc.size());
 }
 
 bool DecompressImage(const uint16_t* delta_frame,
@@ -455,45 +390,180 @@ bool DecompressImage(const uint16_t* delta_frame,
 
 ////////////////////////////////////////////////////////////////////////////////
 
+Frame::Frame(const uint16_t* image, size_t xsize, size_t ysize) {
+  xsize_ = xsize;
+  ysize_ = ysize;
+  size_ = xsize_ * ysize_;
+  state_ = FrameState::EMPTY;
+  flags_ = FrameFlags::NONE;
+  
+  int non_zero_low = 0;
 
-void CompressFrameWithPreview(const uint16_t* delta_frame,
-                              const uint16_t* img,
-                              size_t xsize, size_t ysize,
-                              std::vector<uint8_t>* out) {
-  // Downsample the preview frame to 1/8th width and height.
-  static const int F = 8;  // downscale factor
-  size_t xsize2 = (xsize + F - 1) / F;
-  size_t ysize2 = (ysize + F - 1) / F;
-  std::vector<uint16_t> preview(xsize2 * ysize2);
-  for (size_t y = 0; y < ysize2; ++y) {
-    for (size_t x = 0; x < xsize2; ++x) {
+  if (image) {
+    state_ = FrameState::RAW;
+    high_.reserve(size_);
+    low_.reserve(size_);
+    for (size_t i = 0; i < size_; ++i) {
+      uint16_t pixel = image[i];
+      high_.push_back((pixel >> 8) & 0xff);
+      low_.push_back(pixel & 0xff);
+      non_zero_low |= pixel & 0xff;
+    }
+
+    if (!non_zero_low) {
+      flags_ |= FrameFlags::NO_LOW_BYTES;
+    }
+  }
+}
+
+void Frame::GeneratePreview() {
+  size_t preview_xsize = xsize_ / 8;
+  size_t preview_ysize = ysize_ / 8;
+
+  preview_.reserve(preview_ysize * preview_xsize);
+
+  for (size_t py = 0; py < preview_ysize; py++) {
+    for (size_t px = 0; px < preview_xsize; px++) {
       uint32_t sum = 0;
-      size_t x0 = x * F, y0 = y * F;
-      size_t x1 = x0 + F, y1 = y0 + F;
-      if (x1 > xsize) x1 = xsize;
-      if (y1 > ysize) y1 = ysize;
-      for (size_t y2 = y0; y2 < y1; ++y2) {
-        for (size_t x2 = x0; x2 < x1; ++x2) {
-          sum += img[y2 * xsize + x2];
+      size_t pos = (py * xsize_ + px ) * 8;
+      for (size_t j = 0; j < 8; j++) {
+        for (size_t i = 0; i < 8; i++) {
+          sum += high_[pos++];
         }
+        pos += xsize_ - 8;
       }
-      sum /= ((x1 - x0) * (y1 - y0));
-      // Mask to take only the 6 MSBs
-      preview[y * xsize2 + x] = sum & 0xfc00;
+      preview_.push_back((sum / 64) & 0xfc);
     }
   }
 
-  size_t begin = out->size();
-  out->resize(out->size() + 9);
-  CompressImage(nullptr, preview.data(), xsize2, ysize2, false, out);
-  size_t preview_size = out->size() - begin - 9;
-  CompressImage(delta_frame, img, xsize, ysize, false, out);
-  size_t total_size = out->size() - begin;
-  WriteUint32LE(total_size, out->data() + begin);
-  // Flag indicating this is not a delta frame or frame list.
-  (*out)[begin + 4] = 0;
-  WriteUint32LE(preview_size, out->data() + begin + 5);
+  state_ |= FrameState::PREVIEW_GENERATED;
 }
+
+void Frame::OptionallyApplyDeltaPrediction(Frame &delta_frame) {
+  // heuristic to choose to use delta
+  size_t skip = 15;  // let the heuristic run faster
+  std::vector<size_t> counta(256);
+  std::vector<size_t> countd(256);
+
+  for (size_t i = 0; i < size_; i += skip) {
+    uint8_t a = high_[i];
+    uint8_t d = a - high_[i];
+    counta[a]++;
+    countd[d]++;
+  }
+
+  if (EstimateEntropy(countd) < EstimateEntropy(counta)) {
+
+    for (size_t i = 0; i < size_; i++) {
+      high_[i] -= delta_frame.high(i);
+      low_[i] -= delta_frame.low(i);
+    }
+
+    flags_ |= FrameFlags::USE_DELTA;
+  }
+
+  state_ &= ~FrameState::RAW;
+  state_ |= FrameState::DELTA_PREDICTED;
+}
+
+void Frame::OptionallyApplyClampedGradientPrediction() {
+  std::vector<size_t> counta(256);
+  std::vector<size_t> countb(256);
+
+  size_t skip = 31;  // let the heuristic run faster
+  for (size_t i = xsize_ + 1; i < size_; i += skip) {
+    uint8_t a = high_[i];
+    uint8_t n = high_[i - xsize_];
+    uint8_t w = high_[i - 1];
+    uint8_t nw = high_[i - xsize_ - 1];
+    uint8_t b = a - ClampedGradient(n, w, nw);
+    counta[a]++;
+    countb[b]++;
+  }
+
+  if (EstimateEntropy(countb) < EstimateEntropy(counta)) {
+    for (size_t i = size_ - 1; i > xsize_; --i) {
+        uint8_t n = high_[i - xsize_];
+        uint8_t w = high_[i - 1];
+        uint8_t nw = high_[i - xsize_ - 1];
+        high_[i] -= ClampedGradient(n, w, nw);
+    }
+
+    if (state_ & FrameState::PREVIEW_GENERATED) {
+      size_t preview_xsize = xsize_ / 8;
+      for (size_t i = size_ / 64 - 1; i > preview_xsize; --i) {
+          uint8_t n = preview_[i - preview_xsize];
+          uint8_t w = preview_[i - 1];
+          uint8_t nw = preview_[i - preview_xsize - 1];
+          preview_[i] -= ClampedGradient(n, w, nw);
+      }
+    }
+
+    flags_ |= FrameFlags::USE_CG;
+  }
+
+  state_ &= ~FrameState::RAW;
+  state_ |= FrameState::CG_PREDICTED;
+}
+
+void Frame::ApplyBrotliCompression() {
+  std::vector<uint8_t> compressed;
+  
+  if (state_ & FrameState::PREVIEW_GENERATED) {
+    BrotliCompress(preview_.data(), size_ / 64, &compressed, FPV_BROTLI_QUALITY);
+    preview_.swap(compressed);
+    compressed.clear();
+  }
+
+  if (flags_ & FrameFlags::NO_LOW_BYTES) {
+    low_.clear();
+  } else {
+
+    BrotliCompress(low_.data(), size_, &compressed, FPV_BROTLI_QUALITY);
+    low_.swap(compressed);
+    compressed.clear();
+  }
+
+  BrotliCompress(high_.data(), size_, &compressed, FPV_BROTLI_QUALITY);
+  high_.swap(compressed);
+}
+
+void Frame::Compress(Frame &delta_frame) {
+  if ((state_ & FrameState::PREVIEW_GENERATED) == 0) {
+    GeneratePreview();
+  }
+
+  if (delta_frame.state() > FrameState::EMPTY) {
+    OptionallyApplyDeltaPrediction(delta_frame);
+  }
+
+  OptionallyApplyClampedGradientPrediction();
+  
+  ApplyBrotliCompression();
+}
+
+void Frame::OutputCore(std::vector<uint8_t> *out) {
+  out->reserve(out->size() + 1 + high_.size() + low_.size());
+  out->push_back(flags_);
+  out->insert(out->end(), low_.begin(), low_.end());
+  out->insert(out->end(), high_.begin(), high_.end());
+}
+
+void Frame::OutputFull(std::vector<uint8_t> *out) {
+  size_t total_size = (9 + 1 + preview_.size()) + // preview & flags
+    (1 + high_.size() + low_.size()); // also reserve for OutputCoreFrame
+  out->reserve(out->size() + total_size);
+
+  PushBackUint32LE(total_size, out);
+  // Flag indicating this is not a delta frame or frame list.
+  out->push_back(0);
+  PushBackUint32LE(preview_.size() + 1, out);
+  out->push_back((flags_ & FrameFlags::USE_CG) | FrameFlags::NO_LOW_BYTES);
+  out->insert(out->end(), preview_.begin(), preview_.end());
+
+  OutputCore(out);
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -752,12 +822,13 @@ void Encoder::Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
   xsize_ = xsize;
   ysize_ = ysize;
   std::vector<uint8_t> compressed;
-  compressed.resize(13);
-  WriteUint32LE(xsize, compressed.data() + 0);
-  WriteUint32LE(ysize, compressed.data() + 4);
+  compressed.reserve(13);
+  PushBackUint32LE(xsize, &compressed);
+  PushBackUint32LE(ysize, &compressed);
+  PushBackUint32LE(0, &compressed); // copmressed delta frame size - updated below
+  compressed.push_back(1); // Flag indicating delta frame.
   fpvc::CompressImage(nullptr, delta_frame, xsize, ysize, false, &compressed);
   WriteUint32LE(compressed.size() - 8, compressed.data() + 8);
-  compressed[12] = 1;  // Flag indicating delta frame.
   bytes_written = compressed.size();
   callback(compressed.data(), compressed.size(), payload);
 }
@@ -815,8 +886,8 @@ void Encoder::CompressFrame(const uint16_t* img,
 
 std::vector<uint8_t> Encoder::RunTask(const Task& task) {
   std::vector<uint8_t> compressed;
-  fpvc::CompressFrameWithPreview(delta_frame_.data(), task.frame,
-      xsize_, ysize_, &compressed);
+  fpvc::CompressImage(delta_frame_.data(), task.frame, xsize_, ysize_, true,
+                      &compressed);
   return compressed;
 }
 

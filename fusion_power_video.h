@@ -30,7 +30,7 @@ namespace fpvc {
 
 // Extracts a frame from raw images with 16 bits per pixel, of which 12 bits
 // are used.
-// The input must have xsize * ysize * 2 bytes, the output xsize * ysize values.
+// The input must have xsize * ysize * 2 bytes, the output xsize * ysize value  s.
 // shift = how much to left shift the value to place the MSB of the 12-bit
 // value in the MSB of the 16-bit output.
 void ExtractFrame(const uint8_t* frame, size_t xsize,
@@ -65,6 +65,59 @@ class StreamingDecoder {
   std::vector<uint8_t> buffer;
 };
 
+enum FrameState {
+  EMPTY = 0,
+  RAW = 1,
+  PREVIEW_GENERATED = 2,
+  DELTA_PREDICTED = 4,
+  CG_PREDICTED = 8,
+  COMPRESSED = 16,
+};
+
+enum FrameFlags {
+  NONE = 0,
+  USE_DELTA = 1,
+  USE_CG = 2,
+  NO_LOW_BYTES = 4,
+};
+
+class Frame {
+ public:
+  size_t xsize() const { return xsize_; }
+  size_t ysize() const { return ysize_; }
+  uint8_t flags() const { return flags_; }
+  int state() const { return state_; }
+  uint8_t high(size_t offset) const { return high_[offset]; }
+  size_t highSize() const { return high_.size(); }
+  uint8_t low(size_t offset) const { return low_[offset]; }
+  size_t lowSize() const { return low_.size(); }
+  uint8_t preview(size_t offset) const { return preview_[offset]; }
+  size_t previewSize() const { return preview_.size(); }
+
+  Frame(const uint16_t* image, size_t xsize, size_t ysize);
+
+  void Compress(Frame &delta_frame);
+
+  void OutputCore(std::vector<uint8_t> *out);
+  void OutputFull(std::vector<uint8_t> *out);
+
+ private:
+
+  void GeneratePreview();
+  void OptionallyApplyDeltaPrediction(Frame &delta_frame);
+  void OptionallyApplyClampedGradientPrediction();
+  void ApplyBrotliCompression();
+
+  size_t xsize_;
+  size_t ysize_;
+  size_t size_;
+  uint8_t flags_; // FrameFlags
+  int state_; // FrameState
+  std::vector<uint8_t> preview_;
+  std::vector<uint8_t> high_;
+  std::vector<uint8_t> low_;
+};
+
 // Rnadom access decoder: requires random access to the entire data file,
 // can decode any frame in any order.
 class RandomAccessDecoder {
@@ -83,8 +136,8 @@ class RandomAccessDecoder {
    size_t ysize() const { return ysize_; }
 
    // Returns the dimensions of preview images
-   size_t preview_xsize() const { return (xsize_ + 7) / 8; }
-   size_t preview_ysize() const { return (ysize_ + 7) / 8; }
+   size_t preview_xsize() const { return xsize_ / 8; }
+   size_t preview_ysize() const { return ysize_ / 8; }
 
    // Returns amount of frames in the full file.
    size_t numframes() const { return frame_offsets.size(); }
