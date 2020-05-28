@@ -82,7 +82,20 @@ enum FrameFlags {
 };
 
 class Frame {
+  size_t xsize_ = 0;
+  size_t ysize_ = 0;
+  size_t size_ = 0;
+  uint8_t flags_ = FrameFlags::NONE; // FrameFlags
+  int state_ = FrameState::EMPTY; // FrameState
+
+ protected:
+  std::vector<uint8_t> preview_;
+  std::vector<uint8_t> high_;
+  std::vector<uint8_t> low_;
+
  public:
+  static Frame EMPTY;
+
   size_t xsize() const { return xsize_; }
   size_t ysize() const { return ysize_; }
   uint8_t flags() const { return flags_; }
@@ -94,28 +107,18 @@ class Frame {
   uint8_t preview(size_t offset) const { return preview_[offset]; }
   size_t previewSize() const { return preview_.size(); }
 
-  Frame(const uint16_t* image, size_t xsize, size_t ysize);
+  Frame(size_t xsize = 0, size_t ysize = 0, const uint16_t* image = nullptr);
 
-  void Compress(Frame &delta_frame);
-
+  void Compress(Frame &delta_frame = EMPTY);
   void OutputCore(std::vector<uint8_t> *out);
   void OutputFull(std::vector<uint8_t> *out);
-
+  
  private:
 
   void GeneratePreview();
   void OptionallyApplyDeltaPrediction(Frame &delta_frame);
   void OptionallyApplyClampedGradientPrediction();
   void ApplyBrotliCompression();
-
-  size_t xsize_;
-  size_t ysize_;
-  size_t size_;
-  uint8_t flags_; // FrameFlags
-  int state_; // FrameState
-  std::vector<uint8_t> preview_;
-  std::vector<uint8_t> high_;
-  std::vector<uint8_t> low_;
 };
 
 // Rnadom access decoder: requires random access to the entire data file,
@@ -226,7 +229,7 @@ class Encoder {
   size_t xsize_;
   size_t ysize_;
 
-  std::vector<uint16_t> delta_frame_;
+  Frame delta_frame_;
   std::vector<size_t> frame_offsets;
   size_t bytes_written = 0;
 };

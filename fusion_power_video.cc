@@ -20,6 +20,7 @@
 #include <numeric>
 
 #include <functional>
+#include <algorithm>
 #include <iostream>
 #include <thread>
 
@@ -284,7 +285,6 @@ void WriteUint32LE(uint32_t value, uint8_t* data) {
 }
 
 void PushBackUint32LE(uint32_t value, std::vector<uint8_t> *out) {
-  out->reserve(out->size() + 4);
   out->push_back(value & 0xff);
   out->push_back((value >> 8) & 0xff);
   out->push_back((value >> 16) & 0xff);
@@ -312,25 +312,6 @@ void WriteUint64LE(uint64_t value, uint8_t* data) {
 // Returns whether pos + width > size, taking overflow into account.
 bool OutOfBounds(size_t pos, size_t width, size_t size) {
   return (pos > size) || (size - pos < width);
-}
-
-void CompressImage(const uint16_t* delta_frame,
-                   const uint16_t* img,
-                   size_t xsize, size_t ysize,
-                   bool fullFrame,
-                   std::vector<uint8_t>* out) {
-
-  Frame delta = Frame(delta_frame, xsize, ysize);
-  
-  Frame frame = Frame(img, xsize, ysize);
-  
-  frame.Compress(delta);
-  
-  if (fullFrame) {
-    frame.OutputFull(out);
-  } else {
-    frame.OutputCore(out);
-  }
 }
 
 bool DecompressImage(const uint16_t* delta_frame,
@@ -390,14 +371,16 @@ bool DecompressImage(const uint16_t* delta_frame,
 
 ////////////////////////////////////////////////////////////////////////////////
 
-Frame::Frame(const uint16_t* image, size_t xsize, size_t ysize) {
+Frame Frame::EMPTY(0, 0);
+
+Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image) {
   xsize_ = xsize;
   ysize_ = ysize;
   size_ = xsize_ * ysize_;
   state_ = FrameState::EMPTY;
   flags_ = FrameFlags::NONE;
   
-  int non_zero_low = 0;
+  uint8_t non_zero_low = 0;
 
   if (image) {
     state_ = FrameState::RAW;
@@ -406,10 +389,10 @@ Frame::Frame(const uint16_t* image, size_t xsize, size_t ysize) {
     for (size_t i = 0; i < size_; ++i) {
       uint16_t pixel = image[i];
       high_.push_back((pixel >> 8) & 0xff);
-      low_.push_back(pixel & 0xff);
-      non_zero_low |= pixel & 0xff;
+      pixel &= 0xff;
+      low_.push_back(pixel);
+      non_zero_low |= pixel;
     }
-
     if (!non_zero_low) {
       flags_ |= FrameFlags::NO_LOW_BYTES;
     }
@@ -453,12 +436,11 @@ void Frame::OptionallyApplyDeltaPrediction(Frame &delta_frame) {
   }
 
   if (EstimateEntropy(countd) < EstimateEntropy(counta)) {
-
-    for (size_t i = 0; i < size_; i++) {
-      high_[i] -= delta_frame.high(i);
-      low_[i] -= delta_frame.low(i);
-    }
-
+    std::transform(high_.begin(), high_.end(), delta_frame.high_.begin(),
+                   high_.begin(), std::minus<uint8_t>());
+    std::transform(low_.begin(), low_.end(), delta_frame.low_.begin(),
+                   low_.begin(), std::minus<uint8_t>());
+    
     flags_ |= FrameFlags::USE_DELTA;
   }
 
@@ -482,21 +464,27 @@ void Frame::OptionallyApplyClampedGradientPrediction() {
   }
 
   if (EstimateEntropy(countb) < EstimateEntropy(counta)) {
+    std::vector<uint8_t> h(size_);
     for (size_t i = size_ - 1; i > xsize_; --i) {
         uint8_t n = high_[i - xsize_];
         uint8_t w = high_[i - 1];
         uint8_t nw = high_[i - xsize_ - 1];
-        high_[i] -= ClampedGradient(n, w, nw);
+        h[i] = high_[i] - ClampedGradient(n, w, nw);
     }
+    std::copy_n(high_.begin(),xsize_+1,h.begin());
+    high_.swap(h);
 
     if (state_ & FrameState::PREVIEW_GENERATED) {
       size_t preview_xsize = xsize_ / 8;
+      std::vector<uint8_t> p(size_ / 64);
       for (size_t i = size_ / 64 - 1; i > preview_xsize; --i) {
           uint8_t n = preview_[i - preview_xsize];
           uint8_t w = preview_[i - 1];
           uint8_t nw = preview_[i - preview_xsize - 1];
-          preview_[i] -= ClampedGradient(n, w, nw);
+          p[i] = preview_[i] - ClampedGradient(n, w, nw);
       }
+      std::copy_n(preview_.begin(),preview_xsize+1,p.begin());
+      preview_.swap(p);
     }
 
     flags_ |= FrameFlags::USE_CG;
@@ -512,16 +500,13 @@ void Frame::ApplyBrotliCompression() {
   if (state_ & FrameState::PREVIEW_GENERATED) {
     BrotliCompress(preview_.data(), size_ / 64, &compressed, FPV_BROTLI_QUALITY);
     preview_.swap(compressed);
-    compressed.clear();
   }
 
   if (flags_ & FrameFlags::NO_LOW_BYTES) {
     low_.clear();
   } else {
-
     BrotliCompress(low_.data(), size_, &compressed, FPV_BROTLI_QUALITY);
     low_.swap(compressed);
-    compressed.clear();
   }
 
   BrotliCompress(high_.data(), size_, &compressed, FPV_BROTLI_QUALITY);
@@ -807,9 +792,8 @@ bool RandomAccessDecoder::DecodePreview(size_t index, uint8_t* preview) const {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-
-
 Encoder::Encoder(size_t num_threads) {
+
   threads.resize(num_threads);
   for (size_t i = 0; i < threads.size(); i++) {
     threads[i] = new std::thread(&Encoder::RunThread, this);
@@ -818,7 +802,6 @@ Encoder::Encoder(size_t num_threads) {
 
 void Encoder::Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
     Callback callback, void* payload) {
-  delta_frame_.assign(delta_frame, delta_frame + xsize * ysize);
   xsize_ = xsize;
   ysize_ = ysize;
   std::vector<uint8_t> compressed;
@@ -827,7 +810,13 @@ void Encoder::Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
   PushBackUint32LE(ysize, &compressed);
   PushBackUint32LE(0, &compressed); // copmressed delta frame size - updated below
   compressed.push_back(1); // Flag indicating delta frame.
-  fpvc::CompressImage(nullptr, delta_frame, xsize, ysize, false, &compressed);
+
+  delta_frame_ = Frame(xsize, ysize, delta_frame);
+
+  Frame df = delta_frame_;
+  df.Compress();
+  df.OutputCore(&compressed);
+
   WriteUint32LE(compressed.size() - 8, compressed.data() + 8);
   bytes_written = compressed.size();
   callback(compressed.data(), compressed.size(), payload);
@@ -886,8 +875,13 @@ void Encoder::CompressFrame(const uint16_t* img,
 
 std::vector<uint8_t> Encoder::RunTask(const Task& task) {
   std::vector<uint8_t> compressed;
-  fpvc::CompressImage(delta_frame_.data(), task.frame, xsize_, ysize_, true,
-                      &compressed);
+
+  Frame frame = Frame(xsize_, ysize_, task.frame);
+  
+  frame.Compress(delta_frame_);
+  
+  frame.OutputFull(&compressed);
+  
   return compressed;
 }
 
