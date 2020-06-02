@@ -60,14 +60,11 @@ int main(int argc, char* argv[]) {
 
   size_t framesize = xsize * ysize * 2;
 
-  std::vector<uint8_t> buffer(framesize);
-
-
-  fpvc::Encoder encoder(num_threads);
+  fpvc::Encoder encoder(num_threads, shift, big_endian);
 
   bool initialized = false;
 
-  // Rotate through multiple memory buffers for the input image such that all
+ // Rotate through multiple memory buffers for the input image such that all
   // threads / queued tasks have their own buffer.
   size_t num_buffers = encoder.MaxQueued();
   std::vector<uint16_t> buffers[num_buffers];
@@ -83,10 +80,9 @@ int main(int argc, char* argv[]) {
   };
 
   while (std::cin) {
-    if (!std::cin.read((char*)buffer.data(), framesize)) break;
-
     uint16_t* img = buffers[buffer_index].data();
-    fpvc::ExtractFrame(buffer.data(), xsize, ysize, shift, big_endian, img);
+
+    if (!std::cin.read(reinterpret_cast<char*>(img), framesize)) break;
 
     if (!initialized) {
       initialized = true;

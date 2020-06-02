@@ -144,9 +144,8 @@ void RunBenchmark(const std::string& filename,
     total_pixels += numpixels;
   }
 
-  std::vector<uint16_t> delta_frame(xsize * ysize);
-  fpvc::ExtractFrame(raw.data(), xsize, ysize, shift, big_endian,
-                     delta_frame.data());
+  uint16_t *delta_frame = reinterpret_cast<uint16_t*>(raw.data());
+
   std::vector<uint8_t> header;
   std::vector<uint8_t> footer;
 
@@ -154,35 +153,23 @@ void RunBenchmark(const std::string& filename,
 
   total_timer.start();
   {
-    fpvc::Encoder encoder(num_threads);
+    fpvc::Encoder encoder(num_threads, shift, big_endian);
 
-    // Rotate through multiple memory buffers for the input image such that all
-    // threads / queued tasks have their own buffer.
-    size_t num_buffers = encoder.MaxQueued();
-    std::vector<uint16_t> buffers[num_buffers];
-    for (size_t i = 0; i < num_buffers; i++) {
-      buffers[i].resize(xsize * ysize);
-    }
-    size_t buffer_index = 0;
-
-    encoder.Init(delta_frame.data(), xsize, ysize, [&header, numpixels](
+    encoder.Init(delta_frame, xsize, ysize, [&header, numpixels](
         const uint8_t* compressed, size_t size, void* payload) {
       header.assign(compressed, compressed + size);
       PrintBenchmark("header", 0, size, 0);
     }, nullptr);
     for (size_t i = 0; i < frames.size(); i++) {
       Frame& frame = frames[i];
-      uint16_t* img = buffers[buffer_index].data();
-      fpvc::ExtractFrame(raw.data() + framesize * i, xsize, ysize, shift,
-                         big_endian, img);
-      encoder.CompressFrame(img,
+      uint16_t *frame_data = reinterpret_cast<uint16_t*>(raw.data() + framesize * i);
+      encoder.CompressFrame(frame_data,
           [numpixels](const uint8_t* compressed, size_t size, void* payload) {
             Frame& frame = *reinterpret_cast<Frame*>(payload);
             frame.compressed.assign(compressed, compressed + size);
             PrintBenchmark(
                 "frame " + ToString(frame.index), numpixels, size, 0);
           }, &frame);
-      buffer_index = (buffer_index + 1) % num_buffers;
     }
     encoder.Finish([&footer](
         const uint8_t* compressed, size_t size, void* payload) {

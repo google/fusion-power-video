@@ -26,16 +26,7 @@
 
 namespace fpvc {
 
-// Helper functions to convert 16-bit image frames to/from the raw file format.
-
-// Extracts a frame from raw images with 16 bits per pixel, of which 12 bits
-// are used.
-// The input must have xsize * ysize * 2 bytes, the output xsize * ysize value  s.
-// shift = how much to left shift the value to place the MSB of the 12-bit
-// value in the MSB of the 16-bit output.
-void ExtractFrame(const uint8_t* frame, size_t xsize,
-                  size_t ysize, int shift, bool big_endian,
-                  uint16_t* out);
+// Helper function to convert 16-bit image frames to/from the raw file format.
 
 // Converts 16-bit frame back to the original raw file format.
 void UnextractFrame(const uint16_t* img,
@@ -107,7 +98,9 @@ class Frame {
   uint8_t preview(size_t offset) const { return preview_[offset]; }
   size_t previewSize() const { return preview_.size(); }
 
-  Frame(size_t xsize = 0, size_t ysize = 0, const uint16_t* image = nullptr);
+  Frame(size_t xsize = 0, size_t ysize = 0, const uint16_t* image = nullptr,
+        int shift_to_left_align = 0, bool big_endian = false);
+  Frame(size_t xsize, size_t ysize, const uint8_t* image);
 
   void Compress(Frame &delta_frame = EMPTY);
   void OutputCore(std::vector<uint8_t> *out);
@@ -159,7 +152,7 @@ class Encoder {
  public:
   // Uses num_threads worker threads, or disables multithreading if num_threads
   // is 0.
-  Encoder(size_t num_threads = 8);
+  Encoder(size_t num_threads = 8, int shift_to_left_align = 0, bool big_endian = false);
 
   // The payload is an optional argument to pass from calls to the callback.
   typedef std::function<void(const uint8_t* compressed, size_t size,
@@ -232,6 +225,9 @@ class Encoder {
   Frame delta_frame_;
   std::vector<size_t> frame_offsets;
   size_t bytes_written = 0;
+
+  int shift_to_left_align_ = 0;
+  bool big_endian_ = false;
 };
 
 }  // namespace fpvc

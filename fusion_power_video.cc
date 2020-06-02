@@ -373,7 +373,8 @@ bool DecompressImage(const uint16_t* delta_frame,
 
 Frame Frame::EMPTY(0, 0);
 
-Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image) {
+Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image,
+             int shift_to_left_align, bool big_endian) {
   xsize_ = xsize;
   ysize_ = ysize;
   size_ = xsize_ * ysize_;
@@ -386,16 +387,80 @@ Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image) {
     state_ = FrameState::RAW;
     high_.reserve(size_);
     low_.reserve(size_);
-    for (size_t i = 0; i < size_; ++i) {
-      uint16_t pixel = image[i];
-      high_.push_back((pixel >> 8) & 0xff);
-      pixel &= 0xff;
-      low_.push_back(pixel);
-      non_zero_low |= pixel;
+
+    if (big_endian && (shift_to_left_align == 0)) {
+
+      for (size_t i = 0; i < size_; ++i) {
+        uint16_t pixel = image[i];
+        high_.push_back(pixel & 0xff);
+        pixel = (pixel >> 8) & 0xff;
+        low_.push_back(pixel);
+        non_zero_low |= pixel;
+      }
+
+    } else if (big_endian && (shift_to_left_align == 8)) {
+
+      for (size_t i = 0; i < size_; ++i) {
+        high_.push_back((image[i] >> 8) & 0xff);
+      }
+
+    } else if (big_endian) {
+
+      int low_shift = 8 - shift_to_left_align;
+      int low_shift_high = 16 - shift_to_left_align;
+      for (size_t i = 0; i < size_; ++i) {
+        uint16_t pixel = image[i];
+        high_.push_back(((pixel << shift_to_left_align) | (pixel >> low_shift_high)) & 0xff);
+        pixel = (pixel >>  low_shift) & 0xff;
+        low_.push_back(pixel);
+        non_zero_low |= pixel;
+      }
+      
+    // LITTLE ENDIAN
+    } else if (shift_to_left_align == 0) {
+
+      for (size_t i = 0; i < size_; ++i) {
+        uint16_t pixel = image[i];
+        high_.push_back((pixel >> 8) & 0xff);
+        pixel &= 0xff;
+        low_.push_back(pixel);
+        non_zero_low |= pixel;
+      }
+
+    } else if (shift_to_left_align == 8) {
+
+      for (size_t i = 0; i < size_; ++i) {
+        high_.push_back(image[i] & 0xff);
+      }
+
+    } else {
+
+      for (size_t i = 0; i < size_; ++i) {
+        uint16_t pixel = image[i] << shift_to_left_align;
+        high_.push_back((pixel >> 8) & 0xff);
+        pixel &= 0xff;
+        low_.push_back(pixel);
+        non_zero_low |= pixel;
+      }
+
     }
+    
     if (!non_zero_low) {
       flags_ |= FrameFlags::NO_LOW_BYTES;
     }
+  }
+}
+
+Frame::Frame(size_t xsize, size_t ysize, const uint8_t* image) {
+  xsize_ = xsize;
+  ysize_ = ysize;
+  size_ = xsize_ * ysize_;
+  state_ = FrameState::EMPTY;
+  flags_ = FrameFlags::NO_LOW_BYTES;
+
+  if (image) {
+    state_ = FrameState::RAW;
+    high_.assign(image, image+size_);
   }
 }
 
@@ -551,17 +616,6 @@ void Frame::OutputFull(std::vector<uint8_t> *out) {
 
 
 ////////////////////////////////////////////////////////////////////////////////
-
-void ExtractFrame(const uint8_t* frame, size_t xsize, size_t ysize, int shift,
-                  bool big_endian, uint16_t* out) {
-  size_t numpixels = xsize * ysize;
-  for (size_t i = 0; i < numpixels; i++) {
-    uint8_t high = frame[i * 2 + (big_endian ? 0 : 1)];
-    uint8_t low = frame[i * 2 + (big_endian ? 1 : 0)];
-    out[i] = (high << 8u) | low;
-    out[i] <<= shift;
-  }
-}
 
 void UnextractFrame(const uint16_t* img, size_t xsize, size_t ysize, int shift,
                     bool big_endian, uint8_t* out) {
@@ -792,7 +846,9 @@ bool RandomAccessDecoder::DecodePreview(size_t index, uint8_t* preview) const {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-Encoder::Encoder(size_t num_threads) {
+Encoder::Encoder(size_t num_threads, int shift_to_left_align, bool big_endian) {
+  shift_to_left_align_ = shift_to_left_align;
+  big_endian_ = big_endian;
 
   threads.resize(num_threads);
   for (size_t i = 0; i < threads.size(); i++) {
@@ -811,7 +867,7 @@ void Encoder::Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
   PushBackUint32LE(0, &compressed); // copmressed delta frame size - updated below
   compressed.push_back(1); // Flag indicating delta frame.
 
-  delta_frame_ = Frame(xsize, ysize, delta_frame);
+  delta_frame_ = Frame(xsize, ysize, delta_frame, shift_to_left_align_, big_endian_);
 
   Frame df = delta_frame_;
   df.Compress();
@@ -876,7 +932,7 @@ void Encoder::CompressFrame(const uint16_t* img,
 std::vector<uint8_t> Encoder::RunTask(const Task& task) {
   std::vector<uint8_t> compressed;
 
-  Frame frame = Frame(xsize_, ysize_, task.frame);
+  Frame frame = Frame(xsize_, ysize_, task.frame, shift_to_left_align_, big_endian_);
   
   frame.Compress(delta_frame_);
   
