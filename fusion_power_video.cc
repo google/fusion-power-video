@@ -373,6 +373,13 @@ bool DecompressImage(const uint16_t* delta_frame,
 
 Frame Frame::EMPTY(0, 0);
 
+// std::endian doc explicitly says that std::endian::native may be neither 
+// std::endian::little nor std::endian::big (on mixed endian systems).
+// Therefore this determines the endianess of uint16_t at initialization time
+static const uint16_t SYSTEM_UINT16_ENDIAN_TEST = 0x0100;
+static const bool SYSTEM_UINT16_BIG_ENDIAN = 
+      1 == reinterpret_cast<const uint8_t*>(&SYSTEM_UINT16_ENDIAN_TEST)[0];
+
 Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image,
              int shift_to_left_align, bool big_endian) {
   xsize_ = xsize;
@@ -380,6 +387,8 @@ Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image,
   size_ = xsize_ * ysize_;
   state_ = FrameState::EMPTY;
   flags_ = FrameFlags::NONE;
+
+  bool switch_endian = big_endian != SYSTEM_UINT16_BIG_ENDIAN;
   
   uint8_t non_zero_low = 0;
 
@@ -388,35 +397,37 @@ Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image,
     high_.reserve(size_);
     low_.reserve(size_);
 
-    if (big_endian && (shift_to_left_align == 0)) {
+    if (switch_endian) {
+      if (shift_to_left_align == 0) {
 
-      for (size_t i = 0; i < size_; ++i) {
-        uint16_t pixel = image[i];
-        high_.push_back(pixel & 0xff);
-        pixel = (pixel >> 8) & 0xff;
-        low_.push_back(pixel);
-        non_zero_low |= pixel;
+        for (size_t i = 0; i < size_; ++i) {
+          uint16_t pixel = image[i];
+          high_.push_back(pixel & 0xff);
+          pixel = (pixel >> 8) & 0xff;
+          low_.push_back(pixel);
+          non_zero_low |= pixel;
+        }
+
+      } else if (shift_to_left_align == 8) {
+
+        for (size_t i = 0; i < size_; ++i) {
+          high_.push_back((image[i] >> 8) & 0xff);
+        }
+
+      } else {
+
+        int low_shift = 8 - shift_to_left_align;
+        int low_shift_high = 16 - shift_to_left_align;
+        for (size_t i = 0; i < size_; ++i) {
+          uint16_t pixel = image[i];
+          high_.push_back(((pixel << shift_to_left_align) | (pixel >> low_shift_high)) & 0xff);
+          pixel = (pixel >>  low_shift) & 0xff;
+          low_.push_back(pixel);
+          non_zero_low |= pixel;
+        }
+
       }
-
-    } else if (big_endian && (shift_to_left_align == 8)) {
-
-      for (size_t i = 0; i < size_; ++i) {
-        high_.push_back((image[i] >> 8) & 0xff);
-      }
-
-    } else if (big_endian) {
-
-      int low_shift = 8 - shift_to_left_align;
-      int low_shift_high = 16 - shift_to_left_align;
-      for (size_t i = 0; i < size_; ++i) {
-        uint16_t pixel = image[i];
-        high_.push_back(((pixel << shift_to_left_align) | (pixel >> low_shift_high)) & 0xff);
-        pixel = (pixel >>  low_shift) & 0xff;
-        low_.push_back(pixel);
-        non_zero_low |= pixel;
-      }
-      
-    // LITTLE ENDIAN
+    // data endianess == system endianess
     } else if (shift_to_left_align == 0) {
 
       for (size_t i = 0; i < size_; ++i) {
