@@ -26,16 +26,7 @@
 
 namespace fpvc {
 
-// Helper functions to convert 16-bit image frames to/from the raw file format.
-
-// Extracts a frame from raw images with 16 bits per pixel, of which 12 bits
-// are used.
-// The input must have xsize * ysize * 2 bytes, the output xsize * ysize values.
-// shift = how much to left shift the value to place the MSB of the 12-bit
-// value in the MSB of the 16-bit output.
-void ExtractFrame(const uint8_t* frame, size_t xsize,
-                  size_t ysize, int shift, bool big_endian,
-                  uint16_t* out);
+// Helper function to convert 16-bit image frames to/from the raw file format.
 
 // Converts 16-bit frame back to the original raw file format.
 void UnextractFrame(const uint16_t* img,
@@ -65,6 +56,64 @@ class StreamingDecoder {
   std::vector<uint8_t> buffer;
 };
 
+enum FrameState {
+  EMPTY = 0,
+  RAW = 1,
+  PREVIEW_GENERATED = 2,
+  DELTA_PREDICTED = 4,
+  CG_PREDICTED = 8,
+  COMPRESSED = 16,
+};
+
+enum FrameFlags {
+  NONE = 0,
+  USE_DELTA = 1,
+  USE_CG = 2,
+  NO_LOW_BYTES = 4,
+};
+
+class Frame {
+  size_t xsize_ = 0;
+  size_t ysize_ = 0;
+  size_t size_ = 0;
+  uint8_t flags_ = FrameFlags::NONE; // FrameFlags
+  int state_ = FrameState::EMPTY; // FrameState
+
+ protected:
+  std::vector<uint8_t> preview_;
+  std::vector<uint8_t> high_;
+  std::vector<uint8_t> low_;
+
+ public:
+  static Frame EMPTY;
+
+  size_t xsize() const { return xsize_; }
+  size_t ysize() const { return ysize_; }
+  uint8_t flags() const { return flags_; }
+  int state() const { return state_; }
+  uint8_t high(size_t offset) const { return high_[offset]; }
+  size_t highSize() const { return high_.size(); }
+  uint8_t low(size_t offset) const { return low_[offset]; }
+  size_t lowSize() const { return low_.size(); }
+  uint8_t preview(size_t offset) const { return preview_[offset]; }
+  size_t previewSize() const { return preview_.size(); }
+
+  Frame(size_t xsize = 0, size_t ysize = 0, const uint16_t* image = nullptr,
+        int shift_to_left_align = 0, bool big_endian = false);
+  Frame(size_t xsize, size_t ysize, const uint8_t* image);
+
+  void Compress(Frame &delta_frame = EMPTY);
+  void OutputCore(std::vector<uint8_t> *out);
+  void OutputFull(std::vector<uint8_t> *out);
+  
+ private:
+
+  void GeneratePreview();
+  void OptionallyApplyDeltaPrediction(Frame &delta_frame);
+  void OptionallyApplyClampedGradientPrediction();
+  void ApplyBrotliCompression();
+};
+
 // Rnadom access decoder: requires random access to the entire data file,
 // can decode any frame in any order.
 class RandomAccessDecoder {
@@ -83,8 +132,8 @@ class RandomAccessDecoder {
    size_t ysize() const { return ysize_; }
 
    // Returns the dimensions of preview images
-   size_t preview_xsize() const { return (xsize_ + 7) / 8; }
-   size_t preview_ysize() const { return (ysize_ + 7) / 8; }
+   size_t preview_xsize() const { return xsize_ / 8; }
+   size_t preview_ysize() const { return ysize_ / 8; }
 
    // Returns amount of frames in the full file.
    size_t numframes() const { return frame_offsets.size(); }
@@ -103,7 +152,7 @@ class Encoder {
  public:
   // Uses num_threads worker threads, or disables multithreading if num_threads
   // is 0.
-  Encoder(size_t num_threads = 8);
+  Encoder(size_t num_threads = 8, int shift_to_left_align = 0, bool big_endian = false);
 
   // The payload is an optional argument to pass from calls to the callback.
   typedef std::function<void(const uint8_t* compressed, size_t size,
@@ -173,9 +222,12 @@ class Encoder {
   size_t xsize_;
   size_t ysize_;
 
-  std::vector<uint16_t> delta_frame_;
+  Frame delta_frame_;
   std::vector<size_t> frame_offsets;
   size_t bytes_written = 0;
+
+  int shift_to_left_align_ = 0;
+  bool big_endian_ = false;
 };
 
 }  // namespace fpvc
