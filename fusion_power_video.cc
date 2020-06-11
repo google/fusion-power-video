@@ -252,8 +252,23 @@ bool BrotliDecompress(const uint8_t* in, size_t size, size_t* pos,
 }
 
 template<typename T> T approxLog2(T v) {
-   return ((unsigned) (8*sizeof(T) - __builtin_clzll((v)) - 1));
+  #if defined(__GNUC__) || defined(__clang__)
+		return (unsigned) (8*sizeof(unsigned long long) - __builtin_clzll(v) - 1);
+	#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    unsigned long bsrResult;
+    _BitScanReverse(&bsrResult, v);
+    return static_cast<T>(bsrResult);
+  #else
+    // very inefficient fallback
+    size_t count = 0;
+    while (v) {
+      v >>= 1;
+      count++;
+    }
+    return static_cast<T>(count-1);
+  #endif
 }
+
 // Returns somthing akin to the average entropy per symbol (a guess of bits per pixel).
 float EstimateEntropy(const std::vector<size_t>& v) {
   size_t sum = std::accumulate(v.begin(), v.end(), 0);
