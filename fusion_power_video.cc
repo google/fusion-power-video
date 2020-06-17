@@ -181,43 +181,6 @@ bool FailPrint(const char* file, int line, const std::string& message = "") {
 #define FAILURE(message) false
 #endif  // FAIL_DEBUG_MESSAGE
 
-bool BrotliCompress(const uint8_t* in, size_t size, std::vector<uint8_t>* out,
-                    int quality = 11, int windowbits = BROTLI_MAX_WINDOW_BITS) {
-  // A safe size is BrotliEncoderMaxCompressedSize(size) + 1024, but making the
-  // buffer smaller and only increasing in the rare case it's needed is faster.
-  size_t out_size = size;
-  out->resize(out_size);
-  std::unique_ptr<BrotliEncoderState, std::function<void(BrotliEncoderState*)>>
-      enc(BrotliEncoderCreateInstance(nullptr, nullptr, nullptr),
-          &BrotliEncoderDestroyInstance);
-  if (!enc) return FAILURE("couldn't init brotli encoder");
-  BrotliEncoderSetParameter(enc.get(), BROTLI_PARAM_QUALITY, quality);
-  BrotliEncoderSetParameter(enc.get(), BROTLI_PARAM_LGWIN, windowbits);
-  BrotliEncoderSetParameter(enc.get(), BROTLI_PARAM_SIZE_HINT, size);
-  size_t avail_in = size;
-  const uint8_t* next_in = in;
-  size_t avail_out = out_size;
-  uint8_t* next_out = out->data();
-  do {
-    if (avail_out == 0) {
-      size_t pos = next_out - out->data();
-      size_t more = out_size >> 1u;
-      out_size += more;
-      out->resize(out_size);
-      avail_out += more;
-      next_out = out->data() + pos;
-    }
-    if (!BrotliEncoderCompressStream(enc.get(), BROTLI_OPERATION_FINISH,
-                                     &avail_in, &next_in, &avail_out, &next_out,
-                                     nullptr)) {
-      return FAILURE("brotli compression failed");
-    }
-  } while (!BrotliEncoderIsFinished(enc.get()));
-  out_size -= avail_out;
-  out->resize(out_size);
-  return true;
-}
-
 // pos = where to start, and outputs position of end of stream, allowing to then
 // continue if there are more concatenated streams (or know where the valid
 // brotli stream ended)
@@ -561,21 +524,46 @@ void Frame::OptionallyApplyClampedGradientPrediction() {
 
 void Frame::ApplyBrotliCompression() {
   std::vector<uint8_t> compressed;
-  
-  if (state_ & FrameState::PREVIEW_GENERATED) {
-    BrotliCompress(preview_.data(), size_ / 64, &compressed, FPV_BROTLI_QUALITY);
-    preview_.swap(compressed);
-  }
+  size_t max_encoded_size = BrotliEncoderMaxCompressedSize(size_);
+  size_t compressed_size;
+  compressed.resize(max_encoded_size);
+  compressed_size = max_encoded_size;
+
+  BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                  size_, high_.data(), &compressed_size, compressed.data());
+  compressed.resize(compressed_size);
+  high_.swap(compressed);
 
   if (flags_ & FrameFlags::NO_LOW_BYTES) {
     low_.clear();
   } else {
-    BrotliCompress(low_.data(), size_, &compressed, FPV_BROTLI_QUALITY);
+    compressed_size = size_;
+    // it is possible, but very unlikely that the compressed output will not fit into the 
+    // pre-allocated former high_ buffer of size size_ - if that should happen sometimes,
+    // we pay the penalty of redoing the brotly compression with a resized buffer - but 
+    // in the likely case we avoid the resize - examplary benchmarks show +2% throughput
+    if (!BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    size_, low_.data(), &compressed_size, compressed.data())) {
+      compressed.resize(max_encoded_size);
+      compressed_size = max_encoded_size;
+
+      BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                      size_, low_.data(), &compressed_size, compressed.data());
+    }
+    compressed.resize(compressed_size);
     low_.swap(compressed);
   }
 
-  BrotliCompress(high_.data(), size_, &compressed, FPV_BROTLI_QUALITY);
-  high_.swap(compressed);
+
+  if (state_ & FrameState::PREVIEW_GENERATED) {
+    compressed_size = size_;
+
+    BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    preview_.size(), preview_.data(), &compressed_size, compressed.data());
+    compressed.resize(compressed_size);
+    preview_.swap(compressed);
+  }
+
 }
 
 void Frame::Compress(Frame &delta_frame) {
