@@ -454,6 +454,9 @@ Frame::Frame(size_t xsize, size_t ysize, const uint8_t* image) {
 }
 
 void Frame::GeneratePreview() {
+  if (state_ & FrameState::PREVIEW_GENERATED)
+    return;
+
   size_t preview_xsize = xsize_ / 8;
   size_t preview_ysize = ysize_ / 8;
 
@@ -477,6 +480,9 @@ void Frame::GeneratePreview() {
 }
 
 void Frame::OptionallyApplyDeltaPrediction(Frame &delta_frame) {
+  if (state_ & FrameState::DELTA_PREDICTED) 
+    return;
+  
   // heuristic to choose to use delta
   size_t skip = 15;  // let the heuristic run faster
   std::vector<size_t> counta(256);
@@ -503,6 +509,9 @@ void Frame::OptionallyApplyDeltaPrediction(Frame &delta_frame) {
 }
 
 void Frame::OptionallyApplyClampedGradientPrediction() {
+  if (state_ & FrameState::CG_PREDICTED)
+    return;
+
   std::vector<size_t> counta(256);
   std::vector<size_t> countb(256);
 
@@ -549,6 +558,9 @@ void Frame::OptionallyApplyClampedGradientPrediction() {
 }
 
 void Frame::ApplyBrotliCompression() {
+  if (state_ & FrameState::COMPRESSED)
+    return;
+
   std::vector<uint8_t> compressed;
   size_t max_encoded_size = BrotliEncoderMaxCompressedSize(size_);
   size_t compressed_size;
@@ -580,7 +592,6 @@ void Frame::ApplyBrotliCompression() {
     low_.swap(compressed);
   }
 
-
   if (state_ & FrameState::PREVIEW_GENERATED) {
     compressed_size = size_;
 
@@ -589,14 +600,43 @@ void Frame::ApplyBrotliCompression() {
     compressed.resize(compressed_size);
     preview_.swap(compressed);
   }
+  state_ &= ~FrameState::RAW;
+  state_ |= FrameState::COMPRESSED;
+}
 
+void Frame::ApplyBrotliCompression(size_t* encoded_high_size, uint8_t* encoded_high_buffer,
+    size_t* encoded_low_size, uint8_t* encoded_low_buffer,
+    size_t* encoded_preview_size, uint8_t* encoded_preview_buffer) {
+
+  if (encoded_high_buffer) {
+    BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    size_, high_.data(), encoded_high_size, encoded_high_buffer);
+  } else {
+    *encoded_high_size = 0;
+  }
+
+  if (!encoded_low_buffer || (flags_ & FrameFlags::NO_LOW_BYTES)) {
+    *encoded_low_size = 0;
+  } else {
+    BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    size_, low_.data(), encoded_low_size, encoded_low_buffer);
+  }
+
+  if (encoded_preview_buffer && (state_ & FrameState::PREVIEW_GENERATED)) {
+    BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    preview_.size(), preview_.data(), encoded_preview_size,
+                    encoded_preview_buffer);
+  } else {
+    *encoded_preview_size = 0;
+  }
 }
 
 void Frame::Compress(Frame &delta_frame) {
-  if ((state_ & FrameState::PREVIEW_GENERATED) == 0) {
-    GeneratePreview();
-  }
+  if (state_ & FrameState::COMPRESSED)
+    return;
 
+  GeneratePreview();
+  
   if (delta_frame.state() > FrameState::EMPTY) {
     OptionallyApplyDeltaPrediction(delta_frame);
   }
@@ -606,7 +646,52 @@ void Frame::Compress(Frame &delta_frame) {
   ApplyBrotliCompression();
 }
 
+void Frame::Compress(Frame &delta_frame,
+    size_t* encoded_high_size, uint8_t* encoded_high_buffer,
+    size_t* encoded_low_size, uint8_t* encoded_low_buffer,
+    size_t* encoded_preview_size, uint8_t* encoded_preview_buffer) {
+  if (state_ & FrameState::COMPRESSED) {
+    
+    if (encoded_high_buffer && *encoded_high_size >= high_.size()) {
+      memcpy(encoded_high_buffer, high_.data(), high_.size());
+      *encoded_high_size = high_.size();
+    } else {
+      *encoded_high_size = 0;
+    }
+
+    if (encoded_low_buffer && *encoded_low_size >= low_.size()) {
+      memcpy(encoded_low_buffer, low_.data(), low_.size());
+      *encoded_low_size = low_.size();
+    } else {
+      *encoded_low_size = 0;
+    }
+
+    if (encoded_preview_buffer && *encoded_preview_size >= preview_.size()) {
+      memcpy(encoded_preview_buffer, preview_.data(), preview_.size());
+      *encoded_preview_size = preview_.size();
+    } else {
+      *encoded_preview_size = 0;
+    }
+
+  } else {
+    GeneratePreview();
+  
+    if (delta_frame.state() > FrameState::EMPTY) {
+      OptionallyApplyDeltaPrediction(delta_frame);
+    }
+
+    OptionallyApplyClampedGradientPrediction();
+    
+    ApplyBrotliCompression(encoded_high_size, encoded_high_buffer, 
+                  encoded_low_size, encoded_low_buffer,
+                  encoded_preview_size, encoded_preview_buffer);
+  }
+}
+
 void Frame::OutputCore(std::vector<uint8_t> *out) {
+  if (!(state_ & FrameState::COMPRESSED))
+    return;
+
   out->reserve(out->size() + 1 + high_.size() + low_.size());
   out->push_back(flags_);
   out->insert(out->end(), low_.begin(), low_.end());
@@ -614,6 +699,9 @@ void Frame::OutputCore(std::vector<uint8_t> *out) {
 }
 
 void Frame::OutputFull(std::vector<uint8_t> *out) {
+  if (!(state_ & FrameState::COMPRESSED))
+    return;
+  
   size_t total_size = (9 + 1 + preview_.size()) + // preview & flags
     (1 + high_.size() + low_.size()); // also reserve for OutputCoreFrame
   out->reserve(out->size() + total_size);

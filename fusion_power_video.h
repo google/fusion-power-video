@@ -103,6 +103,10 @@ class Frame {
   Frame(size_t xsize, size_t ysize, const uint8_t* image);
 
   void Compress(Frame &delta_frame = EMPTY);
+  void Compress(Frame &delta_frame,
+    size_t* encoded_high_size, uint8_t* encoded_high_buffer,
+    size_t* encoded_low_size, uint8_t* encoded_low_buffer,
+    size_t* encoded_preview_size, uint8_t* encoded_preview_buffer);
   void OutputCore(std::vector<uint8_t> *out);
   void OutputFull(std::vector<uint8_t> *out);
   
@@ -112,6 +116,9 @@ class Frame {
   void OptionallyApplyDeltaPrediction(Frame &delta_frame);
   void OptionallyApplyClampedGradientPrediction();
   void ApplyBrotliCompression();
+  void ApplyBrotliCompression(size_t* encoded_high_size, uint8_t* encoded_high_buffer,
+    size_t* encoded_low_size, uint8_t* encoded_low_buffer,
+    size_t* encoded_preview_size, uint8_t* encoded_preview_buffer);
 };
 
 // Rnadom access decoder: requires random access to the entire data file,
