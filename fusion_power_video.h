@@ -139,8 +139,8 @@ class RandomAccessDecoder {
    size_t ysize() const { return ysize_; }
 
    // Returns the dimensions of preview images
-   size_t preview_xsize() const { return xsize_ / 8; }
-   size_t preview_ysize() const { return ysize_ / 8; }
+   size_t preview_xsize() const { return xsize_ / 4; }
+   size_t preview_ysize() const { return ysize_ / 4; }
 
    // Returns amount of frames in the full file.
    size_t numframes() const { return frame_offsets.size(); }

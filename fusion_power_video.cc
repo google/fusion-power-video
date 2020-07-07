@@ -73,8 +73,8 @@ frame format:
 -preview_size bytes: preview image in the image format, see image format below.
  This preview image is encoded without any delta frame, and its xsize and ysize
  are 1/8th of the respective main xsize and ysize, rounded down. The preview
- image should only use the 6 most significant bits of each 16-bit sample and
- leave all other 10 bits at zero.
+ image should only use the 8 most significant bits of each 16-bit sample and
+ leave all other 8 bits at zero.
 -remaining bytes: the full frame encoded in the image format, see image format
  below
 
@@ -150,9 +150,8 @@ procedure to decode an image:
  unsigned 16-bit integers.
 -the resulting 16-bit image may represent 12-bit data (or another bit amount),
  in that case, the least significant bits will be set to 0.
--Note: If this is a preview image, only 6 bits per sample are used and the other
- 10 bits are zero. For displaying on an 8-bit display, repeat the two MSBs to
- fill in the two LSBs of the 8-bit display sample.
+-Note: If this is a preview image, only 8 bits per sample are used and the other
+ 8 bits are zero.
 */
 
 namespace fpvc {
@@ -457,22 +456,22 @@ void Frame::GeneratePreview() {
   if (state_ & FrameState::PREVIEW_GENERATED)
     return;
 
-  size_t preview_xsize = xsize_ / 8;
-  size_t preview_ysize = ysize_ / 8;
+  size_t preview_xsize = xsize_ / 4;
+  size_t preview_ysize = ysize_ / 4;
 
   preview_.reserve(preview_ysize * preview_xsize);
 
   for (size_t py = 0; py < preview_ysize; py++) {
     for (size_t px = 0; px < preview_xsize; px++) {
       uint32_t sum = 0;
-      size_t pos = (py * xsize_ + px ) * 8;
-      for (size_t j = 0; j < 8; j++) {
-        for (size_t i = 0; i < 8; i++) {
+      size_t pos = (py * xsize_ + px ) * 4;
+      for (size_t j = 0; j < 4; j++) {
+        for (size_t i = 0; i < 4; i++) {
           sum += high_[pos++];
         }
-        pos += xsize_ - 8;
+        pos += xsize_ - 4;
       }
-      preview_.push_back((sum / 64) & 0xfc);
+      preview_.push_back((sum / 16) & 0xfe);
     }
   }
 
@@ -538,9 +537,9 @@ void Frame::OptionallyApplyClampedGradientPrediction() {
     high_.swap(h);
 
     if (state_ & FrameState::PREVIEW_GENERATED) {
-      size_t preview_xsize = xsize_ / 8;
-      std::vector<uint8_t> p(size_ / 64);
-      for (size_t i = size_ / 64 - 1; i > preview_xsize; --i) {
+      size_t preview_xsize = xsize_ / 4;
+      std::vector<uint8_t> p(size_ / 16);
+      for (size_t i = size_ / 16 - 1; i > preview_xsize; --i) {
           uint8_t n = preview_[i - preview_xsize];
           uint8_t w = preview_[i - 1];
           uint8_t nw = preview_[i - preview_xsize - 1];
@@ -935,9 +934,6 @@ bool RandomAccessDecoder::DecodePreview(size_t index, uint8_t* preview) const {
   for (size_t y = 0; y < ysize; y++) {
     for (size_t x = 0; x < xsize; x++) {
       preview[y * xsize + x] = preview16[y * xsize + x] >> 8;
-      // Since the preview is stored as 6-bit, repeat the MSBs in LSBs to
-      // use all 8 bits.
-      preview[y * xsize + x] |= (preview[y * xsize + x] >> 6);
     }
   }
 
