@@ -245,20 +245,10 @@ float EstimateEntropy(const std::vector<size_t>& v) {
 
 // clamped gradient predictor
 uint8_t ClampedGradient(uint8_t n, uint8_t w, uint8_t nw) {
-#if 0
   const uint8_t i = std::min(n, w), a = std::max(n, w);
   const uint8_t gradient = n + w - nw;
   const uint8_t clamped = (nw < i) ? a : gradient;
   return (nw > a) ? i : clamped;
-#else
-  const uint8_t min = (n>w) ? w : n;
-  const uint8_t max = (n<w) ? w : n;
-  uint8_t gradient = n+w-nw;
-  if (gradient>max) gradient = max;
-  if (gradient<min) gradient = min;
-
-  return gradient;
-#endif
 }
 
 uint32_t ReadUint32LE(const uint8_t* data) {
