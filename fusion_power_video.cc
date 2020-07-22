@@ -232,7 +232,7 @@ template<typename T> T approxLog2(T v) {
 }
 
 // Returns somthing akin to the average entropy per symbol (a guess of bits per pixel).
-float EstimateEntropy(const std::vector<size_t>& v) {
+size_t EstimateEntropy(const std::vector<size_t>& v) {
   size_t sum = std::accumulate(v.begin(), v.end(), 0);
   if (sum == 0) return 0;
   
