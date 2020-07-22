@@ -234,19 +234,31 @@ template<typename T> T approxLog2(T v) {
 // Returns somthing akin to the average entropy per symbol (a guess of bits per pixel).
 float EstimateEntropy(const std::vector<size_t>& v) {
   size_t sum = std::accumulate(v.begin(), v.end(), 0);
+  if (sum == 0) return 0;
+  
   size_t log2sum = approxLog2(sum);
   size_t sumOfLogs = std::accumulate(v.begin(), v.end(), 0, 
         [log2sum] (size_t acc, size_t v) { return acc -  v * (approxLog2(v) - log2sum); });
-  if (sum == 0) return 0;
-  else return 1024 * sumOfLogs / sum;
+  
+  return 1024 * sumOfLogs / sum;
 }
 
 // clamped gradient predictor
 uint8_t ClampedGradient(uint8_t n, uint8_t w, uint8_t nw) {
+#if 0
   const uint8_t i = std::min(n, w), a = std::max(n, w);
   const uint8_t gradient = n + w - nw;
   const uint8_t clamped = (nw < i) ? a : gradient;
   return (nw > a) ? i : clamped;
+#else
+  const uint8_t min = (n>w) ? w : n;
+  const uint8_t max = (n<w) ? w : n;
+  uint8_t gradient = n+w-nw;
+  if (gradient>max) gradient = max;
+  if (gradient<min) gradient = min;
+
+  return gradient;
+#endif
 }
 
 uint32_t ReadUint32LE(const uint8_t* data) {
