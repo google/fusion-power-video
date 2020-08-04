@@ -14,23 +14,14 @@
 
 cmake_minimum_required(VERSION 3.6)
 
-project(FusionPowerVideo CXX)
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_STANDARD_REQUIRED YES)
-
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(Brotli REQUIRED IMPORTED_TARGET libbrotlienc libbrotlidec)
+pkg_check_modules(Arrow REQUIRED IMPORTED_TARGET arrow)
 
-add_library(fusion_power_video STATIC fusion_power_video.h fusion_power_video.cc)
-target_link_libraries(fusion_power_video PRIVATE pthread PkgConfig::Brotli)
+add_library(fpv_arrow_encoder STATIC arrow_encoder.h arrow_encoder.cc)
+target_link_libraries(fpv_arrow_encoder PRIVATE fusion_power_video arrow pthread PkgConfig::Brotli)
 
-foreach (executable IN ITEMS benchmark encode decode)
+foreach (executable IN ITEMS arrow_encoder_test)
   add_executable("${executable}" "${executable}.cc")
-  target_link_libraries("${executable}" fusion_power_video)
+  target_link_libraries("${executable}" fpv_arrow_encoder)
 endforeach ()
-
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/columnar_batch)
-
-if (BUILD_ARROW_ENCODER)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/arrow)
-endif()
