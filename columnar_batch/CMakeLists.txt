@@ -14,20 +14,13 @@
 
 cmake_minimum_required(VERSION 3.6)
 
-project(FusionPowerVideo CXX)
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_STANDARD_REQUIRED YES)
-
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(Brotli REQUIRED IMPORTED_TARGET libbrotlienc libbrotlidec)
+#pkg_check_modules(Brotli REQUIRED IMPORTED_TARGET libbrotlienc libbrotlidec)
 
-add_library(fusion_power_video STATIC fusion_power_video.h fusion_power_video.cc)
-target_link_libraries(fusion_power_video PRIVATE pthread PkgConfig::Brotli)
+add_library(columnar_batch_encoder STATIC columnar_batch.h columnar_batch.cc columnar_batch_encoder.h columnar_batch_encoder.cc)
+target_link_libraries(columnar_batch_encoder PRIVATE fusion_power_video pthread PkgConfig::Brotli)
 
-foreach (executable IN ITEMS benchmark encode decode)
+foreach (executable IN ITEMS columnar_batch_encoder_test)
   add_executable("${executable}" "${executable}.cc")
-  target_link_libraries("${executable}" fusion_power_video)
+  target_link_libraries("${executable}" columnar_batch_encoder)
 endforeach ()
-
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/columnar_batch)
-
