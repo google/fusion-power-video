@@ -2,7 +2,7 @@
 #include <brotli/encode.h>
 #include <iostream>
 
-namespace fpvc {
+namespace fpvc::columnarbatch {
 
     ColumnarBatchEncoder::ColumnarBatchEncoder(size_t xsize, size_t ysize, int shift_to_left_align, bool big_endian,
         BatchProcessor batch_processor, int frames_per_batch) 

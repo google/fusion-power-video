@@ -5,7 +5,7 @@
 #include "columnar_batch.h"
 #include "../fusion_power_video.h"
 
-namespace fpvc {
+namespace fpvc::columnarbatch {
     class ColumnarBatchEncoder {
         public:
 

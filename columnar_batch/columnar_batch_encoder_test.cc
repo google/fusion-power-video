@@ -2,10 +2,10 @@
 #include <memory>
 #include "columnar_batch_encoder.h"
 
-std::unique_ptr<fpvc::ColumnarBatchEncoder> encoder;
-std::unique_ptr<fpvc::ColumnarBatchEncoder> encoder2;
+std::unique_ptr<fpvc::columnarbatch::ColumnarBatchEncoder> encoder;
+std::unique_ptr<fpvc::columnarbatch::ColumnarBatchEncoder> encoder2;
 
-void printRecordBatch(fpvc::BatchPtr batch) {
+void printRecordBatch(fpvc::columnarbatch::BatchPtr batch) {
     if (batch) {
         std::cout << "Got the Batch! \n" << batch->LatestTimestamp() << std::endl;
         encoder->ReturnProcessedBatch(batch);
@@ -14,7 +14,7 @@ void printRecordBatch(fpvc::BatchPtr batch) {
     }
 }
 
-void printRecordBatch2(fpvc::BatchPtr batch) {
+void printRecordBatch2(fpvc::columnarbatch::BatchPtr batch) {
     if (batch) {
         for (int i=0;i<10000000;i++) std::cout << "";
         std::cout << "Got the Batch!" << batch->LatestTimestamp() << std::endl;
@@ -26,7 +26,7 @@ void printRecordBatch2(fpvc::BatchPtr batch) {
 
 int main() {
     std::cout << "FPV Arrow Encoder Test" << std::endl;
-    encoder = std::make_unique<fpvc::ColumnarBatchEncoder>(100,100,0,false,&printRecordBatch,2);
+    encoder = std::make_unique<fpvc::columnarbatch::ColumnarBatchEncoder>(100,100,0,false,&printRecordBatch,2);
     uint16_t img[100*100];
     std::cout << "Pushing frame." << std::endl;
     encoder->PushFrame(123456,img,img).wait();
@@ -37,7 +37,7 @@ int main() {
     std::cout << "Closed - " << end << "." << std::endl;
 
     std::cout << "Second part" << std::endl;
-    encoder2 = std::make_unique<fpvc::ColumnarBatchEncoder>(100,100,0,false,&printRecordBatch2,13);
+    encoder2 = std::make_unique<fpvc::columnarbatch::ColumnarBatchEncoder>(100,100,0,false,&printRecordBatch2,13);
     for (int i=0;i<500;i++) {
         uint16_t img2[100*100];
         img2[0] = i;

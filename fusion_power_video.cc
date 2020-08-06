@@ -368,7 +368,7 @@ static const bool SYSTEM_UINT16_BIG_ENDIAN =
       1 == reinterpret_cast<const uint8_t*>(&SYSTEM_UINT16_ENDIAN_TEST)[0];
 
 Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image,
-             int shift_to_left_align, bool big_endian, uint64_t timestamp) {
+             int shift_to_left_align, bool big_endian, int64_t timestamp) {
   xsize_ = xsize;
   ysize_ = ysize;
   size_ = xsize_ * ysize_;
@@ -450,16 +450,41 @@ Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image,
   }
 }
 
-Frame::Frame(size_t xsize, size_t ysize, const uint8_t* image) {
+Frame::Frame(size_t xsize, size_t ysize, const uint8_t* image, int64_t timestamp) {
   xsize_ = xsize;
   ysize_ = ysize;
   size_ = xsize_ * ysize_;
   state_ = FrameState::EMPTY;
   flags_ = FrameFlags::NO_LOW_BYTES;
+  timestamp_ = timestamp;
 
   if (image) {
     state_ = FrameState::RAW;
     high_.assign(image, image+size_);
+  }
+}
+
+Frame::Frame(size_t xsize, size_t ysize, uint8_t flags, uint8_t state, std::vector<uint8_t> &&high, 
+        std::vector<uint8_t> &&low, std::vector<uint8_t> &&preview, int64_t timestamp) {
+  xsize_ = xsize;
+  ysize_ = ysize;
+  size_ = xsize_ * ysize_;
+  state_ = state;
+  flags_ = flags;
+  high_ = std::move(high);
+  low_ = std::move(low);
+  preview_ = std::move(preview);
+  timestamp_ = timestamp;
+  
+  if (preview_.empty()) {
+    state_ &= ~FrameState::PREVIEW_GENERATED;
+  } else {
+    state |= FrameState::PREVIEW_GENERATED;
+  }
+  if (low_.empty()) {
+    flags |= FrameFlags::NO_LOW_BYTES;
+  } else {
+    flags_ &= ~FrameFlags::NO_LOW_BYTES;
   }
 }
 
@@ -567,6 +592,60 @@ void Frame::OptionallyApplyClampedGradientPrediction() {
   state_ |= FrameState::CG_PREDICTED;
 }
 
+void Frame::OptionallyUnapplyDeltaPrediction(Frame &delta_frame) {
+  if ((state_ & FrameState::DELTA_PREDICTED == 0) || (flags_ & FrameFlags::USE_DELTA == 0)
+          || (delta_frame.state() == FrameState::EMPTY)) 
+    return;
+  
+  std::transform(high_.begin(), high_.end(), delta_frame.high_.begin(),
+                  high_.begin(), std::plus<uint8_t>());
+  std::transform(low_.begin(), low_.end(), delta_frame.low_.begin(),
+                  low_.begin(), std::plus<uint8_t>());
+  
+  flags_ &= !FrameFlags::USE_DELTA;
+  state_ &=  ~FrameState::DELTA_PREDICTED;
+  if (state_ < FrameState::DELTA_PREDICTED) {
+    state_ |= FrameState::RAW;
+  }
+}
+
+void Frame::OptionallyUnapplyClampedGradientPrediction() {
+  if ((state_ & FrameState::CG_PREDICTED == 0) || (flags_ & FrameFlags::USE_CG == 0)) 
+    return;
+
+  if (high_.size() == size_) {
+    std::vector<uint8_t> h(size_);
+    for (size_t i = xsize_ + 1; i < size_; ++i) {
+        uint8_t n = high_[i - xsize_];
+        uint8_t w = high_[i - 1];
+        uint8_t nw = high_[i - xsize_ - 1];
+        h[i] = high_[i] + ClampedGradient(n, w, nw);
+    }
+    std::copy_n(high_.begin(),xsize_+1,h.begin());
+    high_.swap(h);
+  }
+
+  size_t preview_size = size_ / 16;
+  if ((state_ & FrameState::PREVIEW_GENERATED) && (preview_.size() == preview_size)) {
+    size_t preview_xsize = xsize_ / 4;
+    std::vector<uint8_t> p(preview_size);
+    for (size_t i = preview_xsize + 1; i < preview_size; ++i) {
+        uint8_t n = preview_[i - preview_xsize];
+        uint8_t w = preview_[i - 1];
+        uint8_t nw = preview_[i - preview_xsize - 1];
+        p[i] = preview_[i] - ClampedGradient(n, w, nw);
+    }
+    std::copy_n(preview_.begin(),preview_xsize+1,p.begin());
+    preview_.swap(p);
+  }
+
+  flags_ &= ~FrameFlags::USE_CG;
+  state_ &= ~FrameState::CG_PREDICTED;
+  if (state_ < FrameState::DELTA_PREDICTED) {
+    state_ |= FrameState::RAW;
+  }
+}
+
 void Frame::ApplyBrotliCompression() {
   if (state_ & FrameState::COMPRESSED)
     return;
@@ -669,6 +748,33 @@ void Frame::Compress(Frame &delta_frame) {
   Predict(delta_frame);
 
   ApplyBrotliCompression();
+}
+
+void Frame::Uncompress(Frame &delta_frame) {
+  if (state_ & FrameState::COMPRESSED) {
+    if (!high_.empty()) {
+      std::vector<uint8_t> uncompressed(size_);
+      BrotliDecompress(high_.data(), high_.size(), 0, &uncompressed);
+      high_.swap(uncompressed);
+    }
+
+    if (!(low_.empty() || (flags_ & FrameFlags::NO_LOW_BYTES))) {
+      std::vector<uint8_t> uncompressed(size_);
+      BrotliDecompress(low_.data(), low_.size(), 0, &uncompressed);
+      low_.swap(uncompressed);
+    }
+
+    if ((state_ & FrameState::PREVIEW_GENERATED) && !preview_.empty()) {
+      std::vector<uint8_t> uncompressed(size_ / 16);
+      BrotliDecompress(preview_.data(), preview_.size(), 0, &uncompressed);
+      preview_.swap(uncompressed);
+    }
+
+    state_ &= ~FrameState::COMPRESSED;
+  }
+  
+  OptionallyUnapplyClampedGradientPrediction();
+  OptionallyUnapplyDeltaPrediction(delta_frame);
 }
 
 void Frame::Predict(Frame &delta_frame) {

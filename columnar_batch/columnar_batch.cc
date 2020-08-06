@@ -1,6 +1,6 @@
 #include "columnar_batch.h"
 
-namespace fpvc {
+namespace fpvc::columnarbatch {
 
     BatchSchema::BatchSchema(size_t xsize, size_t ysize, size_t shifted_left, Frame &uncompressed_delta_frame) :
         xsize_(xsize), ysize_(ysize), shifted_left_(shifted_left), 
@@ -10,12 +10,19 @@ namespace fpvc {
         size_t encoded_high_size = compressed_delta_frame_high_plane_.size();
         size_t encoded_low_size = compressed_delta_frame_low_plane_.size();
         size_t encoded_preview_size = 0;
+        
+        delta_frame_ = uncompressed_delta_frame;
 
         uncompressed_delta_frame.CompressPredicted(&encoded_high_size, compressed_delta_frame_high_plane_.data(), 
                 &encoded_low_size, compressed_delta_frame_low_plane_.data(),
                 &encoded_preview_size, nullptr);
         compressed_delta_frame_high_plane_.resize(encoded_high_size);
         compressed_delta_frame_low_plane_.resize(encoded_low_size);
+    }
+
+    Image::Image(int64_t timestamp, size_t xsize, size_t ysize, uint8_t bpp, Type type, std::vector<uint8_t> &&data) :
+        timestamp_(timestamp), xsize_(xsize), ysize_(ysize), bpp_(bpp), type_(type), data_(std::move(data)) {
+
     }
 
     Batch::Batch(size_t batch_size, SchemaPtr schema) :
@@ -74,6 +81,41 @@ namespace fpvc {
         length_++;
 
         return true;
+    }
+
+    Image Batch::ExtractImage(size_t index, Image::Type type) {
+        std::vector<uint8_t> high;
+        std::vector<uint8_t> low;
+        std::vector<uint8_t> preview;
+        uint8_t flags = flags_[index];
+        uint8_t state = FrameState::COMPRESSED | FrameState::DELTA_PREDICTED | FrameState::CG_PREDICTED;
+
+        if (type == Image::Type::PREVIEW) {
+            preview.assign(backing_buffer_.begin() + preview_offsets_[index], backing_buffer_.begin() + preview_offsets_[index + 1]);
+        } else {
+            high.assign(backing_buffer_.begin() + high_plane_offsets_[index], backing_buffer_.begin() + high_plane_offsets_[index + 1]);
+            if (type == Image::Type::FULL) {
+                low.assign(backing_buffer_.begin() + low_plane_offsets_[index], backing_buffer_.begin() + low_plane_offsets_[index + 1]);
+            } else {
+                flags |= FrameFlags::NO_LOW_BYTES;
+            }
+        }
+
+        Frame frame(schema_->xsize(), schema_->ysize(), flags, state, std::move(high), std::move(low), std::move(preview), timestamps_[index]);
+        frame.Uncompress(schema_->delta_frame());
+
+        if (type == Image::Type::PREVIEW) {
+            return Image(frame.timestamp(), frame.xsize()/4, frame.ysize()/4, 8, type, std::move(const_cast<std::vector<uint8_t>&>(frame.preview())));
+        } else if (type == Image::Type::MSB8) {
+            return Image(frame.timestamp(), frame.xsize(), frame.ysize(), 8, type, std::move(const_cast<std::vector<uint8_t>&>(frame.high())));
+        } else {
+            std::vector<uint8_t> data(2 * frame.xsize() * frame.ysize());
+            for (size_t i = 0; i < data.size(); i += 2) {
+                data[i] = frame.low()[i>>1];
+                data[i+1] = frame.high()[i>>1];
+            }
+            return Image(frame.timestamp(), frame.xsize(), frame.ysize(), 16 - schema_->shiftedLeft(), type, std::move(data));
+        }
     }
 
 }
