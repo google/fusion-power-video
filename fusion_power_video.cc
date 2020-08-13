@@ -23,7 +23,7 @@
 #include <algorithm>
 #include <iostream>
 #include <thread>
-
+#include <future>
 #include <brotli/decode.h>
 #include <brotli/encode.h>
 
@@ -73,8 +73,8 @@ frame format:
 -preview_size bytes: preview image in the image format, see image format below.
  This preview image is encoded without any delta frame, and its xsize and ysize
  are 1/8th of the respective main xsize and ysize, rounded down. The preview
- image should only use the 6 most significant bits of each 16-bit sample and
- leave all other 10 bits at zero.
+ image should only use the 8 most significant bits of each 16-bit sample and
+ leave all other 8 bits at zero.
 -remaining bytes: the full frame encoded in the image format, see image format
  below
 
@@ -150,9 +150,8 @@ procedure to decode an image:
  unsigned 16-bit integers.
 -the resulting 16-bit image may represent 12-bit data (or another bit amount),
  in that case, the least significant bits will be set to 0.
--Note: If this is a preview image, only 6 bits per sample are used and the other
- 10 bits are zero. For displaying on an 8-bit display, repeat the two MSBs to
- fill in the two LSBs of the 8-bit display sample.
+-Note: If this is a preview image, only 8 bits per sample are used and the other
+ 8 bits are zero.
 */
 
 namespace fpvc {
@@ -233,13 +232,15 @@ template<typename T> T approxLog2(T v) {
 }
 
 // Returns somthing akin to the average entropy per symbol (a guess of bits per pixel).
-float EstimateEntropy(const std::vector<size_t>& v) {
+size_t EstimateEntropy(const std::vector<size_t>& v) {
   size_t sum = std::accumulate(v.begin(), v.end(), 0);
+  if (sum == 0) return 0;
+  
   size_t log2sum = approxLog2(sum);
   size_t sumOfLogs = std::accumulate(v.begin(), v.end(), 0, 
         [log2sum] (size_t acc, size_t v) { return acc -  v * (approxLog2(v) - log2sum); });
-  if (sum == 0) return 0;
-  else return 1024 * sumOfLogs / sum;
+  
+  return 1024 * sumOfLogs / sum;
 }
 
 // clamped gradient predictor
@@ -351,6 +352,14 @@ bool DecompressImage(const uint16_t* delta_frame,
 
 Frame Frame::EMPTY(0, 0);
 
+size_t Frame::MaxCompressedPlaneSize(size_t xsize, size_t ysize) { 
+  return BrotliEncoderMaxCompressedSize(xsize * ysize); 
+}
+
+size_t Frame::MaxCompressedPreviewSize(size_t xsize, size_t ysize) {
+   return BrotliEncoderMaxCompressedSize(xsize * ysize / 16); 
+}
+
 // std::endian doc explicitly says that std::endian::native may be neither 
 // std::endian::little nor std::endian::big (on mixed endian systems).
 // Therefore this determines the endianess of uint16_t at initialization time
@@ -359,12 +368,13 @@ static const bool SYSTEM_UINT16_BIG_ENDIAN =
       1 == reinterpret_cast<const uint8_t*>(&SYSTEM_UINT16_ENDIAN_TEST)[0];
 
 Frame::Frame(size_t xsize, size_t ysize, const uint16_t* image,
-             int shift_to_left_align, bool big_endian) {
+             int shift_to_left_align, bool big_endian, uint64_t timestamp) {
   xsize_ = xsize;
   ysize_ = ysize;
   size_ = xsize_ * ysize_;
   state_ = FrameState::EMPTY;
   flags_ = FrameFlags::NONE;
+  timestamp_ = timestamp;
 
   bool switch_endian = big_endian != SYSTEM_UINT16_BIG_ENDIAN;
   
@@ -454,22 +464,25 @@ Frame::Frame(size_t xsize, size_t ysize, const uint8_t* image) {
 }
 
 void Frame::GeneratePreview() {
-  size_t preview_xsize = xsize_ / 8;
-  size_t preview_ysize = ysize_ / 8;
+  if (state_ & FrameState::PREVIEW_GENERATED)
+    return;
+
+  size_t preview_xsize = xsize_ / 4;
+  size_t preview_ysize = ysize_ / 4;
 
   preview_.reserve(preview_ysize * preview_xsize);
 
   for (size_t py = 0; py < preview_ysize; py++) {
     for (size_t px = 0; px < preview_xsize; px++) {
       uint32_t sum = 0;
-      size_t pos = (py * xsize_ + px ) * 8;
-      for (size_t j = 0; j < 8; j++) {
-        for (size_t i = 0; i < 8; i++) {
+      size_t pos = (py * xsize_ + px ) * 4;
+      for (size_t j = 0; j < 4; j++) {
+        for (size_t i = 0; i < 4; i++) {
           sum += high_[pos++];
         }
-        pos += xsize_ - 8;
+        pos += xsize_ - 4;
       }
-      preview_.push_back((sum / 64) & 0xfc);
+      preview_.push_back((sum / 16) & 0xfe);
     }
   }
 
@@ -477,6 +490,9 @@ void Frame::GeneratePreview() {
 }
 
 void Frame::OptionallyApplyDeltaPrediction(Frame &delta_frame) {
+  if (state_ & FrameState::DELTA_PREDICTED) 
+    return;
+  
   // heuristic to choose to use delta
   size_t skip = 15;  // let the heuristic run faster
   std::vector<size_t> counta(256);
@@ -503,6 +519,9 @@ void Frame::OptionallyApplyDeltaPrediction(Frame &delta_frame) {
 }
 
 void Frame::OptionallyApplyClampedGradientPrediction() {
+  if (state_ & FrameState::CG_PREDICTED)
+    return;
+
   std::vector<size_t> counta(256);
   std::vector<size_t> countb(256);
 
@@ -529,9 +548,9 @@ void Frame::OptionallyApplyClampedGradientPrediction() {
     high_.swap(h);
 
     if (state_ & FrameState::PREVIEW_GENERATED) {
-      size_t preview_xsize = xsize_ / 8;
-      std::vector<uint8_t> p(size_ / 64);
-      for (size_t i = size_ / 64 - 1; i > preview_xsize; --i) {
+      size_t preview_xsize = xsize_ / 4;
+      std::vector<uint8_t> p(size_ / 16);
+      for (size_t i = size_ / 16 - 1; i > preview_xsize; --i) {
           uint8_t n = preview_[i - preview_xsize];
           uint8_t w = preview_[i - 1];
           uint8_t nw = preview_[i - preview_xsize - 1];
@@ -549,8 +568,11 @@ void Frame::OptionallyApplyClampedGradientPrediction() {
 }
 
 void Frame::ApplyBrotliCompression() {
+  if (state_ & FrameState::COMPRESSED)
+    return;
+
   std::vector<uint8_t> compressed;
-  size_t max_encoded_size = BrotliEncoderMaxCompressedSize(size_);
+  size_t max_encoded_size = MaxCompressedPlaneSize();
   size_t compressed_size;
   compressed.resize(max_encoded_size);
   compressed_size = max_encoded_size;
@@ -580,7 +602,6 @@ void Frame::ApplyBrotliCompression() {
     low_.swap(compressed);
   }
 
-
   if (state_ & FrameState::PREVIEW_GENERATED) {
     compressed_size = size_;
 
@@ -589,24 +610,114 @@ void Frame::ApplyBrotliCompression() {
     compressed.resize(compressed_size);
     preview_.swap(compressed);
   }
+  state_ &= ~FrameState::RAW;
+  state_ |= FrameState::COMPRESSED;
+}
 
+void Frame::ApplyBrotliCompression(size_t* encoded_high_size, uint8_t* encoded_high_buffer,
+    size_t* encoded_low_size, uint8_t* encoded_low_buffer,
+    size_t* encoded_preview_size, uint8_t* encoded_preview_buffer, bool parallel) {
+
+  // in the standard case, lo will contain the biggest amount of entropie and compression will
+  // therefore take longer than hi and preview together - so we paralize only lo compression and 
+  // run hi and preview sequentially
+  std::future<void> loCompressTask;
+  if (!encoded_low_buffer || (flags_ & FrameFlags::NO_LOW_BYTES)) {
+    *encoded_low_size = 0;
+  } else if (parallel) {
+    loCompressTask = std::async(std::launch::async,[this, encoded_low_size, encoded_low_buffer] {
+        BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    size_, low_.data(), encoded_low_size, encoded_low_buffer);
+      });
+  } else {
+    BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    size_, low_.data(), encoded_low_size, encoded_low_buffer);
+  }
+
+  if (encoded_high_buffer) {
+    BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    size_, high_.data(), encoded_high_size, encoded_high_buffer);
+  } else {
+    *encoded_high_size = 0;
+  }
+
+  if (encoded_preview_buffer && (state_ & FrameState::PREVIEW_GENERATED)) {
+    BrotliEncoderCompress (FPV_BROTLI_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
+                    preview_.size(), preview_.data(), encoded_preview_size,
+                    encoded_preview_buffer);
+  } else {
+    *encoded_preview_size = 0;
+  }
+
+  if (loCompressTask.valid()) {
+    loCompressTask.wait();
+  }
+}
+
+size_t Frame::MaxCompressedPlaneSize() { 
+  return BrotliEncoderMaxCompressedSize(size_); 
+}
+
+size_t Frame::MaxCompressedPreviewSize() {
+   return BrotliEncoderMaxCompressedSize(size_ / 16); 
 }
 
 void Frame::Compress(Frame &delta_frame) {
-  if ((state_ & FrameState::PREVIEW_GENERATED) == 0) {
-    GeneratePreview();
-  }
+  if (state_ & FrameState::COMPRESSED)
+    return;
 
+  Predict(delta_frame);
+
+  ApplyBrotliCompression();
+}
+
+void Frame::Predict(Frame &delta_frame) {
+  GeneratePreview();
+  
   if (delta_frame.state() > FrameState::EMPTY) {
     OptionallyApplyDeltaPrediction(delta_frame);
   }
 
   OptionallyApplyClampedGradientPrediction();
-  
-  ApplyBrotliCompression();
+}
+
+void Frame::CompressPredicted(size_t* encoded_high_size, uint8_t* encoded_high_buffer,
+    size_t* encoded_low_size, uint8_t* encoded_low_buffer,
+    size_t* encoded_preview_size, uint8_t* encoded_preview_buffer, bool parallel) {
+  if (state_ & FrameState::COMPRESSED) {
+    
+    if (encoded_high_buffer && *encoded_high_size >= high_.size()) {
+      memcpy(encoded_high_buffer, high_.data(), high_.size());
+      *encoded_high_size = high_.size();
+    } else {
+      *encoded_high_size = 0;
+    }
+
+    if (encoded_low_buffer && *encoded_low_size >= low_.size()) {
+      memcpy(encoded_low_buffer, low_.data(), low_.size());
+      *encoded_low_size = low_.size();
+    } else {
+      *encoded_low_size = 0;
+    }
+
+    if (encoded_preview_buffer && *encoded_preview_size >= preview_.size()) {
+      memcpy(encoded_preview_buffer, preview_.data(), preview_.size());
+      *encoded_preview_size = preview_.size();
+    } else {
+      *encoded_preview_size = 0;
+    }
+
+  } else {
+    ApplyBrotliCompression(encoded_high_size, encoded_high_buffer, 
+                  encoded_low_size, encoded_low_buffer,
+                  encoded_preview_size, encoded_preview_buffer, parallel);
+  }
 }
 
 void Frame::OutputCore(std::vector<uint8_t> *out) {
+  if (!(state_ & FrameState::COMPRESSED))
+    return;
+
   out->reserve(out->size() + 1 + high_.size() + low_.size());
   out->push_back(flags_);
   out->insert(out->end(), low_.begin(), low_.end());
@@ -614,6 +725,9 @@ void Frame::OutputCore(std::vector<uint8_t> *out) {
 }
 
 void Frame::OutputFull(std::vector<uint8_t> *out) {
+  if (!(state_ & FrameState::COMPRESSED))
+    return;
+  
   size_t total_size = (9 + 1 + preview_.size()) + // preview & flags
     (1 + high_.size() + low_.size()); // also reserve for OutputCoreFrame
   out->reserve(out->size() + total_size);
@@ -627,7 +741,6 @@ void Frame::OutputFull(std::vector<uint8_t> *out) {
 
   OutputCore(out);
 }
-
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -847,9 +960,6 @@ bool RandomAccessDecoder::DecodePreview(size_t index, uint8_t* preview) const {
   for (size_t y = 0; y < ysize; y++) {
     for (size_t x = 0; x < xsize; x++) {
       preview[y * xsize + x] = preview16[y * xsize + x] >> 8;
-      // Since the preview is stored as 6-bit, repeat the MSBs in LSBs to
-      // use all 8 bits.
-      preview[y * xsize + x] |= (preview[y * xsize + x] >> 6);
     }
   }
 
@@ -882,7 +992,7 @@ void Encoder::Init(const uint16_t* delta_frame, size_t xsize, size_t ysize,
   compressed.push_back(1); // Flag indicating delta frame.
 
   delta_frame_ = Frame(xsize, ysize, delta_frame, shift_to_left_align_, big_endian_);
-
+  
   Frame df = delta_frame_;
   df.Compress();
   df.OutputCore(&compressed);

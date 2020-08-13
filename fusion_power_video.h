@@ -78,6 +78,7 @@ class Frame {
   size_t size_ = 0;
   uint8_t flags_ = FrameFlags::NONE; // FrameFlags
   int state_ = FrameState::EMPTY; // FrameState
+  uint64_t timestamp_;
 
  protected:
   std::vector<uint8_t> preview_;
@@ -91,18 +92,26 @@ class Frame {
   size_t ysize() const { return ysize_; }
   uint8_t flags() const { return flags_; }
   int state() const { return state_; }
-  uint8_t high(size_t offset) const { return high_[offset]; }
-  size_t highSize() const { return high_.size(); }
-  uint8_t low(size_t offset) const { return low_[offset]; }
-  size_t lowSize() const { return low_.size(); }
-  uint8_t preview(size_t offset) const { return preview_[offset]; }
-  size_t previewSize() const { return preview_.size(); }
+  uint64_t timestamp() const { return timestamp_; }
+  std::vector<uint8_t> high() const { return high_; }
+  std::vector<uint8_t> low() const { return low_; }
+  std::vector<uint8_t> preview() const { return preview_; }
 
   Frame(size_t xsize = 0, size_t ysize = 0, const uint16_t* image = nullptr,
-        int shift_to_left_align = 0, bool big_endian = false);
+        int shift_to_left_align = 0, bool big_endian = false, uint64_t timestamp = -1);
   Frame(size_t xsize, size_t ysize, const uint8_t* image);
 
+  static size_t MaxCompressedPlaneSize(size_t xsize, size_t ysize);
+  static size_t MaxCompressedPreviewSize(size_t xsize, size_t ysize);
+
+  size_t MaxCompressedPlaneSize();
+  size_t MaxCompressedPreviewSize();
+
   void Compress(Frame &delta_frame = EMPTY);
+  void Predict(Frame &delta_frame = EMPTY);
+  void CompressPredicted(size_t* encoded_high_size, uint8_t* encoded_high_buffer,
+    size_t* encoded_low_size, uint8_t* encoded_low_buffer,
+    size_t* encoded_preview_size, uint8_t* encoded_preview_buffer, bool parallel = true);
   void OutputCore(std::vector<uint8_t> *out);
   void OutputFull(std::vector<uint8_t> *out);
   
@@ -112,6 +121,10 @@ class Frame {
   void OptionallyApplyDeltaPrediction(Frame &delta_frame);
   void OptionallyApplyClampedGradientPrediction();
   void ApplyBrotliCompression();
+  void ApplyBrotliCompression(size_t* encoded_high_size, uint8_t* encoded_high_buffer,
+    size_t* encoded_low_size, uint8_t* encoded_low_buffer,
+    size_t* encoded_preview_size, uint8_t* encoded_preview_buffer,
+    bool parallel = true);
 };
 
 // Rnadom access decoder: requires random access to the entire data file,
@@ -132,8 +145,8 @@ class RandomAccessDecoder {
    size_t ysize() const { return ysize_; }
 
    // Returns the dimensions of preview images
-   size_t preview_xsize() const { return xsize_ / 8; }
-   size_t preview_ysize() const { return ysize_ / 8; }
+   size_t preview_xsize() const { return xsize_ / 4; }
+   size_t preview_ysize() const { return ysize_ / 4; }
 
    // Returns amount of frames in the full file.
    size_t numframes() const { return frame_offsets.size(); }
