@@ -5,6 +5,9 @@
 #include "columnar_batch.h"
 #include "../fusion_power_video.h"
 
+#ifndef COLUMNAR_BATCH_DECODER_H_
+#define COLUMNAR_BATCH_DECODER_H_
+
 namespace fpvc::columnarbatch {
     class ColumnarBatchDecoder {
         public:
@@ -12,7 +15,7 @@ namespace fpvc::columnarbatch {
         ColumnarBatchDecoder(Image::Type type, bool unshift, ImageProcessor image_processor);
         ~ColumnarBatchDecoder();
 
-        std::future<BatchPtr> PushBatch(uint64_t timestamp, BatchPtr batch);
+        std::future<BatchPtr> PushBatch(BatchPtr batch);
 
         std::shared_future<int64_t> Close();
 
@@ -55,4 +58,5 @@ namespace fpvc::columnarbatch {
     };
 }
 
+#endif // COLUMNAR_BATCH_DECODER_H_
 

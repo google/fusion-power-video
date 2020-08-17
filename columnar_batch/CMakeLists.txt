@@ -26,7 +26,7 @@ INSTALL(TARGETS fpv_columnar_batch
         PUBLIC_HEADER DESTINATION include
 )
 
-foreach (executable IN ITEMS columnar_batch_encoder_test)
+foreach (executable IN ITEMS columnar_batch_encoder_test columnar_batch_decoder_test)
   add_executable("${executable}" "${executable}.cc")
   target_link_libraries("${executable}" fpv_columnar_batch)
 endforeach ()

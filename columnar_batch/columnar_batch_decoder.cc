@@ -1,4 +1,5 @@
 #include "columnar_batch_decoder.h"
+#include <algorithm>
 
 namespace fpvc::columnarbatch {
 
@@ -16,15 +17,15 @@ namespace fpvc::columnarbatch {
     }
 
 
-    std::future<BatchPtr> ColumnarBatchDecoder::PushBatch(uint64_t timestamp, BatchPtr batch) {
+    std::future<BatchPtr> ColumnarBatchDecoder::PushBatch(BatchPtr batch) {
         if (!schema_) {
             schema_ = batch->schema();
         }
-        
+
         if (closing_ || (schema_.get() != batch->schema().get())) {
             return std::future<BatchPtr>();
         }
-        
+
         PromisedBatch promised_batch(batch);
         auto future = promised_batch.future();
 
@@ -65,10 +66,10 @@ namespace fpvc::columnarbatch {
             if (promised_batch.batch()) {
 
                 BatchPtr batch = promised_batch.batch();
-                
+
                 if (delta_frame_.state() == FrameState::EMPTY) {
                     delta_frame_ = Frame(schema_->xsize(), schema_->ysize(),
-                        FrameFlags::NONE, FrameState::COMPRESSED, 
+                        FrameFlags::NONE, FrameState::COMPRESSED,
                         std::vector<uint8_t>(schema_->compressedDeltaFrameHighPlane()),
                         std::vector<uint8_t>(schema_->compressedDeltaFrameHighPlane()),
                         std::vector<uint8_t>());
@@ -76,9 +77,17 @@ namespace fpvc::columnarbatch {
                 }
 
                 for (size_t i = 0; i < batch->length(); i++) {
-                    image_processor_(batch->ExtractImage(i, type_));
+                    Image img = batch->ExtractImage(i, type_);
+        		    size_t shifted_left = schema_->shiftedLeft();
+                    if (unshift_ && shifted_left > 0 && img.bpp() > 8) {
+                        std::transform(img.data16(), img.data16() + img.xsize() * img.ysize(), img.data16(),
+                                [shifted_left](uint16_t v){ return v >> shifted_left; });
+                    }
+
+                    image_processor_(std::move(img));
                 }
                 latest_provided_timestamp = batch->LatestTimestamp();
+
                 promised_batch.Done();
             }
         }

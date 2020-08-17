@@ -91,15 +91,17 @@ namespace fpvc::columnarbatch {
         uint8_t state = FrameState::COMPRESSED | FrameState::DELTA_PREDICTED | FrameState::CG_PREDICTED;
 
         if (type == Image::Type::PREVIEW) {
-            preview.assign(backing_buffer_.begin() + preview_offsets_[index], backing_buffer_.begin() + preview_offsets_[index + 1]);
+            preview.assign(preview_ + preview_offsets_[index], preview_ + preview_offsets_[index + 1]);
         } else {
-            high.assign(backing_buffer_.begin() + high_plane_offsets_[index], backing_buffer_.begin() + high_plane_offsets_[index + 1]);
+            high.assign(high_plane_ + high_plane_offsets_[index], high_plane_ + high_plane_offsets_[index + 1]);
             if (type == Image::Type::FULL) {
-                low.assign(backing_buffer_.begin() + low_plane_offsets_[index], backing_buffer_.begin() + low_plane_offsets_[index + 1]);
+                low.assign(low_plane_ + low_plane_offsets_[index], low_plane_ + low_plane_offsets_[index + 1]);
             } else {
                 flags |= FrameFlags::NO_LOW_BYTES;
             }
         }
+
+        if (!preview.empty()) state |= FrameState::PREVIEW_GENERATED;
 
         Frame frame(schema_->xsize(), schema_->ysize(), flags, state, std::move(high), std::move(low), std::move(preview), timestamps_[index]);
         frame.Uncompress(schema_->delta_frame());

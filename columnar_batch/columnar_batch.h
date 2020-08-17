@@ -1,5 +1,8 @@
 #include "../fusion_power_video.h"
 
+#ifndef COLUMNAR_BATCH_H_
+#define COLUMNAR_BATCH_H_
+
 namespace fpvc::columnarbatch {
     class BatchSchema {
     
@@ -46,7 +49,8 @@ namespace fpvc::columnarbatch {
         size_t const xsize() { return xsize_; }
         size_t const ysize() { return ysize_; }
         size_t const bpp() { return bpp_; }
-        const std::vector<uint8_t> &data() { return data_; }
+        uint8_t* data8() { return data_.data(); }
+        uint16_t* data16() { return reinterpret_cast<uint16_t*>(data_.data()); }
         Type const type() { return type_; }
 
     private:
@@ -103,3 +107,5 @@ namespace fpvc::columnarbatch {
     
 
 }
+
+#endif // COLUMNAR_BATCH_H_
