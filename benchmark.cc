@@ -83,6 +83,24 @@ void PrintBenchmark(const std::string& label, size_t pixels, size_t size,
   }
   std::cerr << std::endl;
 }
+// Renders a downscaled version of the preview in the terminal for testing.
+void RenderPreview(const uint8_t* preview, size_t xsize, size_t ysize) {
+  for(size_t y = 0; y < ysize; y += 4) {
+    for(size_t x = 0; x < xsize; x += 4) {
+      int v = preview[y * xsize + x];
+      if(v < 16) std::cerr << ' ';
+      else if(v < 24) std::cerr << '.';
+      else if(v < 32) std::cerr << ',';
+      else if(v < 48) std::cerr << ':';
+      else if(v < 64) std::cerr << ';';
+      else if(v < 128) std::cerr << '+';
+      else if(v < 192) std::cerr << '=';
+      else std::cerr << '#';
+    }
+    std::cerr << std::endl;
+  }
+  std::cerr << std::endl;
+}
 
 // Runs encoder benchmark and does roundtrip test with both the streaming
 // decoder and the random access decoder.
@@ -107,7 +125,6 @@ void RunBenchmark(const std::string& filename,
 
   maxframes = (maxframes == 0) ? num : (std::min(num, maxframes));
 
-  size_t total_size = 0;
   size_t total_pixels = 0;
   BenchmarkTime total_timer;
 
@@ -115,7 +132,6 @@ void RunBenchmark(const std::string& filename,
     std::vector<uint8_t> orig;
     std::vector<uint8_t> compressed;
     size_t index;
-    size_t* total_size;
   };
   std::vector<Frame> frames(maxframes);
 
@@ -124,13 +140,11 @@ void RunBenchmark(const std::string& filename,
     frame.orig.assign(raw.data() + framesize * i,
                       raw.data() + framesize * (i + 1));
     frame.index = i;
-    frame.total_size = &total_size;
     total_pixels += numpixels;
   }
 
-  std::vector<uint16_t> delta_frame(xsize * ysize);
-  fpvc::ExtractFrame(raw.data(), xsize, ysize, shift, big_endian,
-                     delta_frame.data());
+  uint16_t *delta_frame = reinterpret_cast<uint16_t*>(raw.data());
+
   std::vector<uint8_t> header;
   std::vector<uint8_t> footer;
 
@@ -138,36 +152,23 @@ void RunBenchmark(const std::string& filename,
 
   total_timer.start();
   {
-    fpvc::Encoder encoder(num_threads);
+    fpvc::Encoder encoder(num_threads, shift, big_endian);
 
-    // Rotate through multiple memory buffers for the input image such that all
-    // threads / queued tasks have their own buffer.
-    size_t num_buffers = encoder.MaxQueued();
-    std::vector<uint16_t> buffers[num_buffers];
-    for (size_t i = 0; i < num_buffers; i++) {
-      buffers[i].resize(xsize * ysize);
-    }
-    size_t buffer_index = 0;
-
-    encoder.Init(delta_frame.data(), xsize, ysize, [&header, numpixels](
+    encoder.Init(delta_frame, xsize, ysize, [&header, numpixels](
         const uint8_t* compressed, size_t size, void* payload) {
       header.assign(compressed, compressed + size);
       PrintBenchmark("header", 0, size, 0);
     }, nullptr);
     for (size_t i = 0; i < frames.size(); i++) {
       Frame& frame = frames[i];
-      uint16_t* img = buffers[buffer_index].data();
-      fpvc::ExtractFrame(raw.data() + framesize * i, xsize, ysize, shift,
-                         big_endian, img);
-      encoder.CompressFrame(img,
+      uint16_t *frame_data = reinterpret_cast<uint16_t*>(raw.data() + framesize * i);
+      encoder.CompressFrame(frame_data,
           [numpixels](const uint8_t* compressed, size_t size, void* payload) {
             Frame& frame = *reinterpret_cast<Frame*>(payload);
             frame.compressed.assign(compressed, compressed + size);
-            *frame.total_size += size;
             PrintBenchmark(
                 "frame " + ToString(frame.index), numpixels, size, 0);
           }, &frame);
-      buffer_index = (buffer_index + 1) % num_buffers;
     }
     encoder.Finish([&footer](
         const uint8_t* compressed, size_t size, void* payload) {
@@ -177,8 +178,6 @@ void RunBenchmark(const std::string& filename,
   }
 
   double total_time = total_timer.stop();
-  PrintBenchmark("total", total_pixels, total_size, total_time, frames.size());
-
 
   std::vector<uint8_t> compressed = header;
   for (size_t i = 0; i < frames.size(); i++) {
@@ -187,8 +186,10 @@ void RunBenchmark(const std::string& filename,
   }
   compressed.insert(compressed.end(), footer.begin(), footer.end());
 
-  // Test the streaming decoder
+  PrintBenchmark("total", total_pixels, compressed.size(), total_time,
+      frames.size());
 
+  // Test the streaming decoder
   {
     std::cerr << "verifying streaming decoder..." << std::endl;
     fpvc::StreamingDecoder decoder;
@@ -235,8 +236,9 @@ void RunBenchmark(const std::string& filename,
 
   // Test the random access decoder
 
-  std::cerr << "verifying random access decoder..." << std::endl;
   {
+    std::cerr << "verifying random access decoder..." << std::endl;
+
     fpvc::RandomAccessDecoder decoder;
     if (!decoder.Init(compressed.data(), compressed.size())) {
       std::cerr << "RandomAccessDecoder::Init failed" << std::endl;
@@ -247,6 +249,10 @@ void RunBenchmark(const std::string& filename,
       std::cerr << "RandomAccessDecoder::Init mismatch" << std::endl;
       std::exit(1);
     }
+
+    size_t pxsize = decoder.preview_xsize();
+    size_t pysize = decoder.preview_ysize();
+
     for (size_t i = 0; i < frames.size(); i++) {
       Frame& frame = frames[i];
       const std::vector<uint8_t>& before = frame.orig;
@@ -255,6 +261,16 @@ void RunBenchmark(const std::string& filename,
         std::cerr << "RandomAccessDecoder::DecodeFrame failed" << std::endl;
         std::exit(1);
       }
+      std::vector<uint8_t> preview(pxsize * pysize);
+      if (!decoder.DecodePreview(i, preview.data())) {
+        std::cerr << "RandomAccessDecoder::DecodePreview failed" << std::endl;
+        std::exit(1);
+      }
+
+      // Uncomment this to manually verify previews. This prints a lot of lines
+      // in the terminal.
+      //RenderPreview(preview.data(), pxsize, pysize);
+
       std::vector<uint8_t> after(framesize);
       fpvc::UnextractFrame(image.data(), xsize, ysize, shift, big_endian,
                            after.data());
