@@ -96,6 +96,9 @@ class Frame {
   const std::vector<uint8_t> &high() { return high_; }
   const std::vector<uint8_t> &low() { return low_; }
   const std::vector<uint8_t> &preview() { return preview_; }
+  std::vector<uint8_t> &&MoveOutHigh() { return std::move(high_); }
+  std::vector<uint8_t> &&MoveOutLow() { return std::move(low_); }
+  std::vector<uint8_t> &&MoveOutPreview() { return std::move(preview_); }
 
   Frame(size_t xsize = 0, size_t ysize = 0, const uint16_t* image = nullptr,
         int shift_to_left_align = 0, bool big_endian = false, int64_t timestamp = -1);

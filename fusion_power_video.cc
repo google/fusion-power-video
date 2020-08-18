@@ -596,12 +596,12 @@ void Frame::OptionallyUnapplyDeltaPrediction(Frame &delta_frame) {
   if (!(state_ & FrameState::DELTA_PREDICTED) || !(flags_ & FrameFlags::USE_DELTA)
           || (delta_frame.state() == FrameState::EMPTY)) 
     return;
-  
+
   std::transform(high_.begin(), high_.end(), delta_frame.high_.begin(),
                   high_.begin(), std::plus<uint8_t>());
   std::transform(low_.begin(), low_.end(), delta_frame.low_.begin(),
                   low_.begin(), std::plus<uint8_t>());
-  
+
   flags_ &= ~FrameFlags::USE_DELTA;
   state_ &=  ~FrameState::DELTA_PREDICTED;
   if (state_ < FrameState::DELTA_PREDICTED) {
@@ -614,29 +614,23 @@ void Frame::OptionallyUnapplyClampedGradientPrediction() {
     return;
 
   if (high_.size() == size_) {
-    std::vector<uint8_t> h(size_);
     for (size_t i = xsize_ + 1; i < size_; ++i) {
         uint8_t n = high_[i - xsize_];
         uint8_t w = high_[i - 1];
         uint8_t nw = high_[i - xsize_ - 1];
-        h[i] = high_[i] + ClampedGradient(n, w, nw);
+        high_[i] += ClampedGradient(n, w, nw);
     }
-    std::copy_n(high_.begin(),xsize_+1,h.begin());
-    high_.swap(h);
   }
 
   size_t preview_size = size_ / 16;
   if ((state_ & FrameState::PREVIEW_GENERATED) && (preview_.size() == preview_size)) {
     size_t preview_xsize = xsize_ / 4;
-    std::vector<uint8_t> p(preview_size);
     for (size_t i = preview_xsize + 1; i < preview_size; ++i) {
         uint8_t n = preview_[i - preview_xsize];
         uint8_t w = preview_[i - 1];
         uint8_t nw = preview_[i - preview_xsize - 1];
-        p[i] = preview_[i] + ClampedGradient(n, w, nw);
+        preview_[i] += ClampedGradient(n, w, nw);
     }
-    std::copy_n(preview_.begin(),preview_xsize+1,p.begin());
-    preview_.swap(p);
   }
 
   flags_ &= ~FrameFlags::USE_CG;

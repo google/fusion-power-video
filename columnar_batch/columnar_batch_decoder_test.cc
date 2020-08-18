@@ -10,7 +10,7 @@ void decodeRecordBatch(fpvc::columnarbatch::BatchPtr batch) {
     if (batch) {
         std::cout << "Got the Batch! " << std::endl;
         encoder->ReturnProcessedBatch(decoder->PushBatch(batch).get());
-        std::cout << "Returned the Batch! \n" << batch->LatestTimestamp() << std::endl;
+        std::cout << "Returned the Batch! " << batch->LatestTimestamp() << std::endl;
     } else {
         std::cout << "Got the NULLPTR!" << std::endl;
     }
@@ -18,7 +18,7 @@ void decodeRecordBatch(fpvc::columnarbatch::BatchPtr batch) {
 
 void compareImage(fpvc::columnarbatch::Image image) {
     static uint16_t ii = 1;
-    std::cout << "Got the Image " << ii << "!" << image.timestamp() << std::endl;
+    std::cout << "Got the Image " << ii << "! " << image.timestamp() << std::endl;
     for (uint16_t i=0; i<100*100;i++) {
         if (image.data16()[i] != i*ii)
             std::cout << "Bad Pixel " << i << " (" << image.data16()[i] << " != " << (i*ii) << ")" << std::endl;
@@ -36,10 +36,16 @@ int main() {
 
     std::cout << "Pushing frame." << std::endl;
     encoder->PushFrame(123456,img,img).wait();
-    std::cout << "Pushing second frame." << std::endl;
-    for (uint16_t i=0; i<100*100;i++) img[i] = 2*i;
 
+    std::cout << "Pushing second frame." << std::endl;
+    for (uint16_t i=0; i<100*100;i++) img[i] += i;
     encoder->PushFrame(234567,img,img).wait();
+
+
+    std::cout << "Pushing third frame." << std::endl;
+    for (uint16_t i=0; i<100*100;i++) img[i] += i;
+    encoder->PushFrame(345678,img,img).wait();
+
     std::cout << "Frame buffer available again." << std::endl;
 
     auto end = encoder->Close().get();

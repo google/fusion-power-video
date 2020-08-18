@@ -1,12 +1,15 @@
 #include "columnar_batch.h"
+#include <algorithm>
 
 namespace fpvc::columnarbatch {
 
     BatchSchema::BatchSchema(size_t xsize, size_t ysize, size_t shifted_left, Frame &uncompressed_delta_frame) :
         xsize_(xsize), ysize_(ysize), shifted_left_(shifted_left), 
-        compressed_delta_frame_high_plane_(Frame::MaxCompressedPlaneSize(xsize, ysize)),
-        compressed_delta_frame_low_plane_(Frame::MaxCompressedPlaneSize(xsize, ysize)) {
-        
+        compressed_delta_frame_high_plane_(),
+        compressed_delta_frame_low_plane_() {
+        compressed_delta_frame_high_plane_.reserve(Frame::MaxCompressedPlaneSize(xsize, ysize));
+        compressed_delta_frame_low_plane_.reserve(Frame::MaxCompressedPlaneSize(xsize, ysize));
+
         size_t encoded_high_size = compressed_delta_frame_high_plane_.size();
         size_t encoded_low_size = compressed_delta_frame_low_plane_.size();
         size_t encoded_preview_size = 0;
@@ -107,15 +110,13 @@ namespace fpvc::columnarbatch {
         frame.Uncompress(schema_->delta_frame());
 
         if (type == Image::Type::PREVIEW) {
-            return Image(frame.timestamp(), frame.xsize()/4, frame.ysize()/4, 8, type, std::move(const_cast<std::vector<uint8_t>&>(frame.preview())));
+            return Image(frame.timestamp(), frame.xsize()/4, frame.ysize()/4, 8, type, frame.MoveOutPreview());
         } else if (type == Image::Type::MSB8) {
-            return Image(frame.timestamp(), frame.xsize(), frame.ysize(), 8, type, std::move(const_cast<std::vector<uint8_t>&>(frame.high())));
+            return Image(frame.timestamp(), frame.xsize(), frame.ysize(), 8, type, frame.MoveOutHigh());
         } else {
             std::vector<uint8_t> data(2 * frame.xsize() * frame.ysize());
-            for (size_t i = 0; i < data.size(); i += 2) {
-                data[i] = frame.low()[i>>1];
-                data[i+1] = frame.high()[i>>1];
-            }
+            std::transform(frame.low().begin(), frame.low().end(), frame.high().begin(), reinterpret_cast<uint16_t*>(data.data()),
+                    [](int l, int h) { return l | (h<<8); });
             return Image(frame.timestamp(), frame.xsize(), frame.ysize(), 16 - schema_->shiftedLeft(), type, std::move(data));
         }
     }
