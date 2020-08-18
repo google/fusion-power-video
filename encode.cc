@@ -79,23 +79,6 @@ int main(int argc, char* argv[]) {
     fwrite(compressed, 1, size, stdout);
   };
 
-  bool initialized = false;
-
-  // Rotate through multiple memory buffers for the input image such that all
-  // threads / queued tasks have their own buffer.
-  size_t num_buffers = encoder.MaxQueued();
-  std::vector<uint16_t> buffers[num_buffers];
-  for (size_t i = 0; i < num_buffers; i++) {
-    buffers[i].resize(xsize * ysize);
-  }
-  size_t buffer_index = 0;
-
-  // Callback function for all stages of the encoder that output data.
-  auto WriteFunction = [](const uint8_t* compressed, size_t size,
-                         void* payload) {
-    fwrite(compressed, 1, size, stdout);
-  };
-
   while (std::cin) {
     uint16_t* img = buffers[buffer_index].data();
 
