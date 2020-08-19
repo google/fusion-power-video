@@ -77,8 +77,8 @@ class Frame {
   size_t ysize_ = 0;
   size_t size_ = 0;
   uint8_t flags_ = FrameFlags::NONE; // FrameFlags
-  int state_ = FrameState::EMPTY; // FrameState
-  uint64_t timestamp_;
+  uint8_t state_ = FrameState::EMPTY; // FrameState
+  int64_t timestamp_;
 
  protected:
   std::vector<uint8_t> preview_;
@@ -91,15 +91,20 @@ class Frame {
   size_t xsize() const { return xsize_; }
   size_t ysize() const { return ysize_; }
   uint8_t flags() const { return flags_; }
-  int state() const { return state_; }
-  uint64_t timestamp() const { return timestamp_; }
-  std::vector<uint8_t> high() const { return high_; }
-  std::vector<uint8_t> low() const { return low_; }
-  std::vector<uint8_t> preview() const { return preview_; }
+  uint8_t state() const { return state_; }
+  int64_t timestamp() const { return timestamp_; }
+  const std::vector<uint8_t> &high() { return high_; }
+  const std::vector<uint8_t> &low() { return low_; }
+  const std::vector<uint8_t> &preview() { return preview_; }
+  std::vector<uint8_t> &&MoveOutHigh() { return std::move(high_); }
+  std::vector<uint8_t> &&MoveOutLow() { return std::move(low_); }
+  std::vector<uint8_t> &&MoveOutPreview() { return std::move(preview_); }
 
   Frame(size_t xsize = 0, size_t ysize = 0, const uint16_t* image = nullptr,
-        int shift_to_left_align = 0, bool big_endian = false, uint64_t timestamp = -1);
-  Frame(size_t xsize, size_t ysize, const uint8_t* image);
+        int shift_to_left_align = 0, bool big_endian = false, int64_t timestamp = -1);
+  Frame(size_t xsize, size_t ysize, const uint8_t* image, int64_t timestamp = -1);
+  Frame(size_t xsize, size_t ysize, uint8_t flags, uint8_t state, std::vector<uint8_t> &&high, 
+        std::vector<uint8_t> &&low, std::vector<uint8_t> &&preview, int64_t timestamp = -1);
 
   static size_t MaxCompressedPlaneSize(size_t xsize, size_t ysize);
   static size_t MaxCompressedPreviewSize(size_t xsize, size_t ysize);
@@ -108,6 +113,7 @@ class Frame {
   size_t MaxCompressedPreviewSize();
 
   void Compress(Frame &delta_frame = EMPTY);
+  void Uncompress(Frame &delta_frame = EMPTY);
   void Predict(Frame &delta_frame = EMPTY);
   void CompressPredicted(size_t* encoded_high_size, uint8_t* encoded_high_buffer,
     size_t* encoded_low_size, uint8_t* encoded_low_buffer,
@@ -125,6 +131,11 @@ class Frame {
     size_t* encoded_low_size, uint8_t* encoded_low_buffer,
     size_t* encoded_preview_size, uint8_t* encoded_preview_buffer,
     bool parallel = true);
+
+  void UnapplyBrotliCompression();
+  void OptionallyUnapplyDeltaPrediction(Frame &delta_frame);
+  void OptionallyUnapplyClampedGradientPrediction();
+  
 };
 
 // Rnadom access decoder: requires random access to the entire data file,

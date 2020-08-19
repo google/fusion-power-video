@@ -24,6 +24,12 @@ pkg_check_modules(Brotli REQUIRED IMPORTED_TARGET libbrotlienc libbrotlidec)
 add_library(fusion_power_video STATIC fusion_power_video.h fusion_power_video.cc)
 target_link_libraries(fusion_power_video PRIVATE pthread PkgConfig::Brotli)
 
+set_target_properties(fusion_power_video PROPERTIES PUBLIC_HEADER "fusion_power_video.h")
+INSTALL(TARGETS fusion_power_video
+        ARCHIVE DESTINATION lib 
+        PUBLIC_HEADER DESTINATION include
+)
+
 foreach (executable IN ITEMS benchmark encode decode)
   add_executable("${executable}" "${executable}.cc")
   target_link_libraries("${executable}" fusion_power_video)

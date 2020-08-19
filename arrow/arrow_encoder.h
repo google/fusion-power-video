@@ -1,3 +1,6 @@
+#ifndef FPV_ARROW_ENCODER_H_
+#define FPV_ARROW_ENCODER_H_
+
 #include <future>
 #include <list>
 #include <mutex>
@@ -111,4 +114,4 @@ namespace fpvc {
 
 }
 
-
+#endif // FPV_ARROW_ENCODER_H_

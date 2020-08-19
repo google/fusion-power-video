@@ -1,6 +1,9 @@
+#ifndef FPV_COLUMNAR_BATCH_H_
+#define FPV_COLUMNAR_BATCH_H_
+
 #include "../fusion_power_video.h"
 
-namespace fpvc {
+namespace fpvc::columnarbatch {
     class BatchSchema {
     
     public:
@@ -9,7 +12,9 @@ namespace fpvc {
         const size_t xsize() { return xsize_; }
         const size_t ysize() { return ysize_; }
         const size_t shiftedLeft() { return shifted_left_; }
+        Frame &delta_frame() { return delta_frame_; }
 
+        /// Delta Frame is _not_ CG predicted
         const std::vector<uint8_t> &compressedDeltaFrameHighPlane() { return compressed_delta_frame_high_plane_; }
         const std::vector<uint8_t> &compressedDeltaFrameLowPlane() { return compressed_delta_frame_low_plane_; }
 
@@ -22,9 +27,42 @@ namespace fpvc {
 
         std::vector<uint8_t> compressed_delta_frame_high_plane_;
         std::vector<uint8_t> compressed_delta_frame_low_plane_;
+        Frame delta_frame_;
     };
 
     typedef std::shared_ptr<BatchSchema> SchemaPtr;
+
+    class Image {
+
+    public:
+
+        enum Type {
+            PREVIEW,
+            MSB8,
+            FULL
+        };
+
+        Image(int64_t timestamp = -1, size_t xsize = 0, size_t ysize = 0, uint8_t bpp = 0,
+            Type type = Type::FULL, std::vector<uint8_t> &&data = std::vector<uint8_t>());
+
+        size_t const timestamp() { return timestamp_; }
+        size_t const xsize() { return xsize_; }
+        size_t const ysize() { return ysize_; }
+        size_t const bpp() { return bpp_; }
+        uint8_t* data8() { return data_.data(); }
+        uint16_t* data16() { return reinterpret_cast<uint16_t*>(data_.data()); }
+        Type const type() { return type_; }
+
+    private:
+        int64_t timestamp_;
+        size_t xsize_;
+        size_t ysize_;
+        uint8_t bpp_;
+        std::vector<uint8_t> data_;
+        Type type_;
+    };
+
+    typedef std::function<void(Image)> ImageProcessor;
     
     class Batch {
 
@@ -37,6 +75,10 @@ namespace fpvc {
         bool Empty() { return length_ == 0; }
         bool Full() { return length_ == batch_size_; }
         int64_t LatestTimestamp() { return (length_ == 0) ? -1 : timestamps_[length_-1]; }
+        size_t length() { return length_; }
+        Image ExtractImage(size_t index, Image::Type type);
+
+        SchemaPtr const schema() { return schema_; };
 
     private:
         SchemaPtr schema_;
@@ -62,5 +104,8 @@ namespace fpvc {
     
     typedef std::function<void(BatchPtr)> BatchProcessor;
 
+    
 
 }
+
+#endif // FPV_COLUMNAR_BATCH_H_

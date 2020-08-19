@@ -1,3 +1,7 @@
+
+#ifndef FPV_COLUMNAR_BATCH_ENCODER_H_
+#define FPV_COLUMNAR_BATCH_ENCODER_H_
+
 #include <future>
 #include <list>
 #include <mutex>
@@ -5,7 +9,7 @@
 #include "columnar_batch.h"
 #include "../fusion_power_video.h"
 
-namespace fpvc {
+namespace fpvc::columnarbatch {
     class ColumnarBatchEncoder {
         public:
 
@@ -56,4 +60,4 @@ namespace fpvc {
     };
 }
 
-
+#endif // FPV_COLUMNAR_BATCH_ENCODER_H_

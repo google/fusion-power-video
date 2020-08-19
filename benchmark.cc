@@ -83,7 +83,6 @@ void PrintBenchmark(const std::string& label, size_t pixels, size_t size,
   }
   std::cerr << std::endl;
 }
-
 // Renders a downscaled version of the preview in the terminal for testing.
 void RenderPreview(const uint8_t* preview, size_t xsize, size_t ysize) {
   for(size_t y = 0; y < ysize; y += 4) {
@@ -177,6 +176,7 @@ void RunBenchmark(const std::string& filename,
       PrintBenchmark("footer", 0, size, 0);
     }, nullptr);
   }
+
   double total_time = total_timer.stop();
 
   std::vector<uint8_t> compressed = header;
@@ -235,8 +235,10 @@ void RunBenchmark(const std::string& filename,
   }
 
   // Test the random access decoder
+
   {
     std::cerr << "verifying random access decoder..." << std::endl;
+
     fpvc::RandomAccessDecoder decoder;
     if (!decoder.Init(compressed.data(), compressed.size())) {
       std::cerr << "RandomAccessDecoder::Init failed" << std::endl;
@@ -315,7 +317,7 @@ int main(int argc, char* argv[]) {
   }
 
   size_t maxframes = 0;
-  size_t numthreads = 8;
+  size_t numthreads = 4;
 
   if (argc >= 7) maxframes = ParseInt(argv[6]);
   if (argc >= 8) numthreads = ParseInt(argv[7]);
