@@ -1,7 +1,7 @@
-#include "../fusion_power_video.h"
+#ifndef FPV_COLUMNAR_BATCH_H_
+#define FPV_COLUMNAR_BATCH_H_
 
-#ifndef COLUMNAR_BATCH_H_
-#define COLUMNAR_BATCH_H_
+#include "../fusion_power_video.h"
 
 namespace fpvc::columnarbatch {
     class BatchSchema {
@@ -108,4 +108,4 @@ namespace fpvc::columnarbatch {
 
 }
 
-#endif // COLUMNAR_BATCH_H_
+#endif // FPV_COLUMNAR_BATCH_H_
